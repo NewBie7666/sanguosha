@@ -25,6 +25,8 @@ export interface ApplyResult extends ViewSnapshot {
   roomState?: RoomState | null;
   /** 是否被 rejected */
   actionRejected?: boolean;
+  /** 服务端提供的机器可读拒绝原因；旧服务端可能缺省。 */
+  actionRejectedReason?: string;
   /** 是否需要清空 view 回到 lobby（game_reset） */
   resetToLobby?: boolean;
 }
@@ -157,7 +159,7 @@ export function applyServerMessage(
     case 'game_started':
       return { ...base, phaseChangedTo: 'playing' };
     case 'actionRejected':
-      return { ...base, actionRejected: true };
+      return { ...base, actionRejected: true, actionRejectedReason: msg.reason ?? 'unknown' };
     default:
       return base;
   }

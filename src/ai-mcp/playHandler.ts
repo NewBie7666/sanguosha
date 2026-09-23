@@ -62,6 +62,8 @@ export interface PlayResult {
 
   /** accepted=被服务端接受 / rejected=被拒 / timeout=决策慢被服务端超时 resolve / not-applicable=本次未执行 action */
   lastActionResult: 'accepted' | 'rejected' | 'timeout' | 'not-applicable';
+  /** lastActionResult=rejected 时的机器可读原因。 */
+  lastActionRejectionReason: string | null;
 }
 
 // 默认无限等待：服务端自有 pending 超时（30~50s × timeoutSec）推进状态，
@@ -72,6 +74,7 @@ const registeredSkillSets = new WeakMap<HeadlessGameClient, Set<string>>();
 
 export async function runPlay(hgc: HeadlessGameClient, input: PlayInput): Promise<PlayResult> {
   let lastActionResult: PlayResult['lastActionResult'] = 'not-applicable';
+  let lastActionRejectionReason: string | null = null;
   // 提交 action 后,必须等服务端真正处理(seq 推进 / 被拒 / 游戏结束)再判定 needsAction。
   // sendAction 是 fire-and-forget 的 HTTP POST,首个同步 tick 看到的仍是 pre-action 旧视图
   // (此时 needsAction 仍为提交前的 true)→ 立即返回 accepted + 旧手牌,LLM 误判"未生效"并
@@ -144,6 +147,7 @@ export async function runPlay(hgc: HeadlessGameClient, input: PlayInput): Promis
         stateDiff,
         newLog: hgc.drainNewEvents(),
         lastActionResult,
+        lastActionRejectionReason,
       };
     };
     const settle = () => resolve(snapshot());
@@ -151,6 +155,7 @@ export async function runPlay(hgc: HeadlessGameClient, input: PlayInput): Promis
       // 服务端拒了本次 action：报告 rejected，继续等下一个 needsAction 点
       if (hgc.consumeActionRejected()) {
         lastActionResult = 'rejected';
+        lastActionRejectionReason = hgc.lastActionRejectedReason ?? 'unknown';
         actionProcessed = true; // 被拒 = 服务端已处理本次 action
       }
       if (hgc.phase === 'ended' || hgc.gameOverWinner !== null) return settle();

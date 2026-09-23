@@ -189,7 +189,7 @@ export type ServerMessage =
       deadline?: DeadlineInfo | null;
     }
   | { type: 'error'; message: string }
-  | { type: 'actionRejected' }
+  | { type: 'actionRejected'; reason?: string }
   | { type: 'gameOver'; winner: string }
   | { type: 'game_reset' }
   | { type: 'room_joined'; roomId: string; playerId: string; seatIndex?: number }

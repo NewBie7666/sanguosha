@@ -126,8 +126,11 @@ describe('runPlay', () => {
     expect(res.stateDiff).toBeNull();
   });
 
-  it('action 被服务端拒后报告 rejected', async () => {
-    const fake = makeFake({ consumeActionRejected: () => true });
+  it('action 被服务端拒后报告 rejected 和机器可读原因', async () => {
+    const fake = makeFake({
+      consumeActionRejected: () => true,
+      lastActionRejectedReason: 'stale_pending_seq',
+    });
     const action: EngineClientMessage = {
       skillId: '杀',
       actionType: 'use',
@@ -137,6 +140,7 @@ describe('runPlay', () => {
     };
     const res = await runPlay(fake, { action: { message: action }, waitTimeoutMs: 80 });
     expect(res.lastActionResult).toBe('rejected');
+    expect(res.lastActionRejectionReason).toBe('stale_pending_seq');
     expect(res.stateDiff).toBeNull();
   });
 

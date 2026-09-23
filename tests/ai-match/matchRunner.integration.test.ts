@@ -121,7 +121,15 @@ describe('match runner 完整闭环', () => {
         coverage_ratio: expect.any(Number),
       }));
       expect(Number(summary['training_eligible_steps'])).toBeGreaterThan(0);
+      expect(summary['invalid_model_outputs']).toBe(0);
+      expect(summary['model_parse_errors']).toBe(0);
+      expect(summary['model_invalid_action_ids']).toBe(0);
+      expect(summary['model_request_errors']).toBe(0);
+      expect(summary['stale_windows']).toEqual(expect.any(Number));
+      expect(summary['engine_rejection_reasons']).toEqual(expect.any(Object));
       expect(events.every((event) => event['legal_action_coverage'])).toBe(true);
+      expect(events.every((event) => Array.isArray(event['engine_rejection_reasons']))).toBe(true);
+      expect(events.every((event) => Array.isArray(event['model_error_kinds']))).toBe(true);
       expect((await readdir(runDirectory)).sort()).toEqual(['config.json', 'game.jsonl', 'summary.json', 'summary.md']);
     } finally {
       await Promise.all([closeServer(endpointA.server), closeServer(endpointB.server)]);

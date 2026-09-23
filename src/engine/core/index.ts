@@ -297,9 +297,20 @@ export async function registerSkillsFromState(state: GameState): Promise<void> {
  * respond execute 完成后 .then(resolve) 恢复父 execute。若 slot.isTimeout(超时已在处理中),
  * 丢弃该 action,避免超时与用户回应竞态。
  */
+export type DispatchRejectReason =
+  | 'preceding_action_invalid'
+  | 'skip_no_pending'
+  | 'skip_pending_timeout'
+  | 'skip_nonblocking_pending'
+  | 'action_invalid'
+  | 'pending_timeout'
+  | 'stale_pending_seq';
+
 export interface DispatchResult {
   /** validate 通过且 execute 已启动(或 skip 已处理)。false = 拒绝。 */
   accepted: boolean;
+  /** accepted=false 时的机器可读拒绝原因，供上层诊断/统计；不包含隐藏游戏信息。 */
+  rejectionReason?: DispatchRejectReason;
   /** execute 到达挂起点(slot 创建)或执行完成时 resolve;resolve 时若 execute 抛错则携带该错误,否则为 undefined。validate 拒绝路径立即 resolve(undefined)。 */
   settle: Promise<Error | undefined>;
 }
@@ -322,9 +333,9 @@ export async function dispatch(state: GameState, message: ClientMessage): Promis
     settleResolve(error);
   };
   state.onExecuteSettle = signalSettle;
-  const reject = (): DispatchResult => {
+  const reject = (rejectionReason: DispatchRejectReason): DispatchResult => {
     signalSettle();
-    return { accepted: false, settle };
+    return { accepted: false, rejectionReason, settle };
   };
   const accept = (): DispatchResult => ({ accepted: true, settle });
   // 让出事件循环直到 settle(execute resume 后创建 slot 触发 onExecuteSettle)或预算耗尽。
@@ -374,7 +385,7 @@ export async function dispatch(state: GameState, message: ClientMessage): Promis
       if (pEntry?.validate(state, p.params) !== null) {
         await rollbackPreceding();
         cleanupResidualPending();
-        return reject();
+        return reject('preceding_action_invalid');
       }
       await pEntry.execute(state, p.params);
       rollbacks.push({ entry: pEntry, params: p.params });
@@ -394,7 +405,8 @@ export async function dispatch(state: GameState, message: ClientMessage): Promis
       return typeof t === 'number' && t < 0;
     });
     const slot = broadcastSlot ?? findPendingSlot(state, message.ownerId);
-    if (!slot || slot.isTimeout) return reject();
+    if (!slot) return reject('skip_no_pending');
+    if (slot.isTimeout) return reject('skip_pending_timeout');
     const atomTarget = (slot.atom as { target?: number }).target;
     const isBroadcast = typeof atomTarget === 'number' && atomTarget < 0;
     if (isBroadcast) {
@@ -424,12 +436,12 @@ export async function dispatch(state: GameState, message: ClientMessage): Promis
       return accept();
     }
     // 非阻塞型 pending(出牌窗口):不支持 skip,返回 false
-    return reject();
+    return reject('skip_nonblocking_pending');
   }
   const entry = findActionEntry(state, message.skillId, message.ownerId, message.actionType);
   if (entry?.validate(state, message.params) !== null) {
     await rollbackPreceding();
-    return reject();
+    return reject('action_invalid');
   }
   // 回应路径:定位该玩家对应的 slot。
   // 单 target 询问(询问闪/杀/弃牌):Map 只有该 target 一个 slot → 直接 ownerId 命中。
@@ -441,7 +453,7 @@ export async function dispatch(state: GameState, message: ClientMessage): Promis
   if (oldSlot) {
     if (oldSlot.isTimeout) {
       await rollbackPreceding();
-      return reject();
+      return reject('pending_timeout');
     }
     // pending-scoped 版本校验：只影响 respond 路径(阻塞型 pending 如 请求回应/询问闪)
     // 出牌窗口是非阻塞 pending，主动出牌/用技不应校验 pendingSeq
@@ -456,7 +468,7 @@ export async function dispatch(state: GameState, message: ClientMessage): Promis
       message.pendingSeq < oldSlot.createdSeq
     ) {
       await rollbackPreceding();
-      return reject();
+      return reject('stale_pending_seq');
     }
     oldSlot.pause();
   }

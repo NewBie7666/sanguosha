@@ -41,6 +41,8 @@ export class HeadlessGameClient {
   private _pendingNewEvents: ViewEvent[] = [];
   /** 最近一次 action 是否被服务端拒（供 runPlay 轮询）。每次 sendAction 重置。 */
   private _lastActionRejected = false;
+  /** 最近一次拒绝的机器可读原因。 */
+  private _lastActionRejectedReason: string | null = null;
   private readonly callbacks: HeadlessCallbacks;
   /** REST/SSE base URL，如 'http://localhost:3930'（无 /ws 后缀） */
   private readonly baseUrl: string;
@@ -114,6 +116,10 @@ export class HeadlessGameClient {
 
   get gameOverWinner(): string | null {
     return this._gameOverWinner;
+  }
+
+  get lastActionRejectedReason(): string | null {
+    return this._lastActionRejectedReason;
   }
 
   /** 是否为旁观者 */
@@ -493,6 +499,7 @@ export class HeadlessGameClient {
     }
     if (r.actionRejected) {
       this._lastActionRejected = true;
+      this._lastActionRejectedReason = r.actionRejectedReason ?? 'unknown';
       this.callbacks.onActionRejected?.();
     }
     // 聊天消息处理
@@ -1037,6 +1044,7 @@ export class HeadlessGameClient {
 
   sendAction(action: EngineClientMessage): void {
     this._lastActionRejected = false;
+    this._lastActionRejectedReason = null;
     // 阻塞型 pending 期间 respond 携带 pendingSeq（当前窗口 seq），非阻塞（出牌窗口）不带
     const pending = this._view?.pending;
     const pendingSeq = pending?.isBlocking ? this._lastSeq : undefined;
@@ -1055,11 +1063,13 @@ export class HeadlessGameClient {
       });
       if (!response.ok) {
         this._lastActionRejected = true;
+        this._lastActionRejectedReason = `http_${response.status}`;
         const body = (await response.json().catch(() => ({}))) as { error?: string };
         this.callbacks.onError?.(new Error(body.error ?? `提交动作失败(${response.status})`));
       }
     } catch (err) {
       this._lastActionRejected = true;
+      this._lastActionRejectedReason = 'network_error';
       this.callbacks.onError?.(err instanceof Error ? err : new Error(String(err)));
     }
   }

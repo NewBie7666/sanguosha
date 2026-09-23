@@ -340,7 +340,10 @@ export class GameSession {
     // debug 模式:允许以任意角色名发 action
     // 非 debug 模式:校验 ownerId 必须匹配预期玩家
     const expectedIndex = this.playerNames.get(playerId);
-    if (expectedIndex === undefined && !this.debug) return;
+    if (expectedIndex === undefined && !this.debug) {
+      this.sendToPlayer(playerId, { type: 'actionRejected', reason: 'unknown_player' });
+      return;
+    }
     // debug 模式不校验 ownerId——单人控制所有角色
     // 非 debug 模式:校验 ownerId
     if (!this.debug && action.ownerId !== expectedIndex) {
@@ -348,6 +351,7 @@ export class GameSession {
         actionOwner: action.ownerId,
         expected: expectedIndex,
       });
+      this.sendToPlayer(playerId, { type: 'actionRejected', reason: 'owner_mismatch' });
       return;
     }
     // dispatch 返回 DispatchResult:{ accepted, settle }。settle 供重放用,正常对局忽略。
@@ -355,10 +359,17 @@ export class GameSession {
     const result = await dispatch(this.state, action).catch((err) => {
       const e = err instanceof Error ? err : new Error(String(err));
       this.logger.error('dispatch error', { error: e.stack ?? String(e) });
-      return { accepted: false, settle: Promise.resolve<Error | undefined>(undefined) } as const;
+      return {
+        accepted: false,
+        rejectionReason: 'dispatch_error',
+        settle: Promise.resolve<Error | undefined>(undefined),
+      } as const;
     });
     if (!result.accepted) {
-      this.sendToPlayer(playerId, { type: 'actionRejected' });
+      this.sendToPlayer(playerId, {
+        type: 'actionRejected',
+        reason: result.rejectionReason ?? 'unknown',
+      });
     }
   }
 

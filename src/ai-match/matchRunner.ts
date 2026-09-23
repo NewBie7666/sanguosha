@@ -30,13 +30,17 @@ interface PlayResult {
   availableActions: AvailableAction[];
   recommendedAction: AvailableAction | null;
   lastActionResult: 'accepted' | 'rejected' | 'timeout' | 'not-applicable';
+  lastActionRejectionReason: string | null;
 }
+
+type AttemptErrorKind = 'model_request' | 'model_parse' | 'invalid_action_id';
 
 interface LoggedAttempt {
   request?: Record<string, unknown>;
   raw?: string;
   response?: ProviderResponse;
   error?: string;
+  errorKind?: AttemptErrorKind;
   actionId?: string;
 }
 
@@ -187,6 +191,26 @@ function sumCoverage(events: Array<Record<string, unknown>>): LegalActionCoverag
   };
 }
 
+function countAttemptErrors(events: Array<Record<string, unknown>>, kind: AttemptErrorKind): number {
+  return events.reduce((total, event) => {
+    const kinds = event['model_error_kinds'];
+    return total + (Array.isArray(kinds) ? kinds.filter((value) => value === kind).length : 0);
+  }, 0);
+}
+
+function rejectionReasonCounts(events: Array<Record<string, unknown>>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const event of events) {
+    const reasons = event['engine_rejection_reasons'];
+    if (!Array.isArray(reasons)) continue;
+    for (const reason of reasons) {
+      if (typeof reason !== 'string') continue;
+      counts[reason] = (counts[reason] ?? 0) + 1;
+    }
+  }
+  return counts;
+}
+
 function makeSummaryMarkdown(summary: Record<string, unknown>): string {
   const tokens = summary['tokens'] as { a?: number; b?: number } | undefined;
   return [
@@ -204,7 +228,8 @@ function makeSummaryMarkdown(summary: Record<string, unknown>): string {
     `- 模型：A=${summary['models'] && (summary['models'] as Record<string, unknown>)['a']}；B=${summary['models'] && (summary['models'] as Record<string, unknown>)['b']}`,
     `- Token：A=${tokens?.a ?? 0}；B=${tokens?.b ?? 0}`,
     `- 平均模型延迟：${summary['average_latency_ms']} ms`,
-    `- 非法模型输出：${summary['invalid_model_outputs']}；引擎拒绝：${summary['engine_rejections']}；fallback：${summary['fallback_actions']}`,
+    `- 模型错误：parse=${summary['model_parse_errors']}；invalid_action_id=${summary['model_invalid_action_ids']}；request=${summary['model_request_errors']}`,
+    `- stale window：${summary['stale_windows']}；引擎拒绝：${summary['engine_rejections']}；fallback：${summary['fallback_actions']}`,
     `- 可训练决策：${summary['training_eligible_steps']} / ${summary['decision_steps']}`,
     `- LegalAction 模板覆盖率：${((summary['legal_action_coverage'] as LegalActionCoverage | undefined)?.coverage_ratio ?? 0) * 100}%`,
     ...(typeof summary['error'] === 'string' ? ['', `错误：${summary['error']}`] : []),
@@ -321,6 +346,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
       let modelActionValid = false;
       let fallbackReason: string | undefined;
       let engineRejections = 0;
+      const engineRejectionReasons: string[] = [];
       let staleWindow = false;
       let lastSubmittedAction: LegalAction | null = null;
 
@@ -364,20 +390,31 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           attempt.request = response.request_body;
           attempt.raw = response.raw_text;
           attempt.response = response;
+          let actionId: string | null = null;
           try {
-            const actionId = parseActionId(response.raw_text);
+            actionId = parseActionId(response.raw_text);
             attempt.actionId = actionId;
-            chosen = resolveActionId(actionId, latestActions);
-            modelActionValid = true;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             errors.push(message);
             attempt.error = message;
+            attempt.errorKind = 'model_parse';
+          }
+          if (actionId) {
+            try {
+              chosen = resolveActionId(actionId, latestActions);
+              modelActionValid = true;
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              errors.push(message);
+              attempt.error = message;
+              attempt.errorKind = 'invalid_action_id';
+            }
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           errors.push(message);
-          attempt = { error: message };
+          attempt = { error: message, errorKind: 'model_request' };
         }
         attempts.push(attempt);
         if (!chosen) continue;
@@ -390,7 +427,8 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         currentResult = asPlayResult(submitted);
         if (currentResult.lastActionResult === 'rejected') {
           engineRejections++;
-          errors.push('游戏引擎拒绝了本次动作；请基于新的 observation 和 legal_actions 重选');
+          engineRejectionReasons.push(currentResult.lastActionRejectionReason ?? 'unknown');
+          errors.push(`游戏引擎拒绝了本次动作(${currentResult.lastActionRejectionReason ?? 'unknown'})；请基于新的 observation 和 legal_actions 重选`);
           chosen = null;
           currentSnapshot = await snapshotFor(client);
           if (!snapshotNeedsDecision(currentSnapshot)) {
@@ -425,13 +463,17 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           model_action_valid: modelActionValid,
           retry_count: Math.max(0, attempts.length - 1),
           engine_rejections: engineRejections,
+          engine_rejection_reasons: engineRejectionReasons,
           fallback: false,
+          stale_window: true,
           training_eligible: false,
           action_result: 'stale_window',
           game_result_after_action: null,
           latency_ms: latencyOf(attempts),
           tokens: totalTokens,
-          model_errors: ['提交前决策窗口已切换；丢弃过期动作并重新等待'],
+          model_errors: attempts.flatMap((attempt) => attempt.error ? [attempt.error] : []),
+          model_error_kinds: attempts.flatMap((attempt) => attempt.errorKind ? [attempt.errorKind] : []),
+          scheduler_errors: ['提交前决策窗口已切换；丢弃过期动作并重新等待'],
         });
         inFlight[arrived.seat] = client.callTool('play', {}).then(asPlayResult).then((result) => ({ seat: arrived.seat, result }));
         continue;
@@ -452,6 +494,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           currentResult = asPlayResult(submitted);
           if (currentResult.lastActionResult !== 'rejected') break;
           engineRejections++;
+          engineRejectionReasons.push(currentResult.lastActionRejectionReason ?? 'unknown');
           alreadyTried.add(fallback.action_id);
           chosen = null;
           currentSnapshot = await snapshotFor(client);
@@ -479,7 +522,9 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         model_action_valid: modelActionValid,
         retry_count: attempts.length > 0 ? attempts.length - 1 : 0,
         engine_rejections: engineRejections,
+        engine_rejection_reasons: engineRejectionReasons,
         fallback: !modelActionValid,
+        stale_window: false,
         training_eligible: modelActionValid && engineRejections === 0 && currentResult.lastActionResult === 'accepted',
         ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
         unsupported_action_count: latestCoverage.unsupported_templates,
@@ -488,6 +533,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         latency_ms: latencyOf(attempts),
         tokens: totalTokens,
         model_errors: attempts.flatMap((attempt) => attempt.error ? [attempt.error] : []),
+        model_error_kinds: attempts.flatMap((attempt) => attempt.errorKind ? [attempt.errorKind] : []),
       };
       await writeEvent(event);
       privateHistory[arrived.seat].push({ phase: latestObservation.phase, action: chosen.description });
@@ -537,6 +583,11 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
   };
   const coverage = sumCoverage(events);
   const trainingEligibleSteps = events.filter((event) => event['training_eligible'] === true).length;
+  const modelParseErrors = countAttemptErrors(events, 'model_parse');
+  const modelInvalidActionIds = countAttemptErrors(events, 'invalid_action_id');
+  const modelRequestErrors = countAttemptErrors(events, 'model_request');
+  const staleWindows = events.filter((event) => event['stale_window'] === true).length;
+  const engineRejectionReasons = rejectionReasonCounts(events);
   const summary: Record<string, unknown> = {
     status: completionStatus,
     engine_id: 'wmzy/sanguosha',
@@ -557,8 +608,13 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
     tokens: { a: tokenA, b: tokenB, total: tokenA + tokenB },
     average_latency_ms: events.length ? Math.round(latencyTotal / events.length) : 0,
     average_latency_ms_by_player: { a: latencyByPlayer('a'), b: latencyByPlayer('b') },
-    invalid_model_outputs: events.reduce((sum, event) => sum + (Array.isArray(event['model_errors']) ? event['model_errors'].length : 0), 0),
+    model_parse_errors: modelParseErrors,
+    model_invalid_action_ids: modelInvalidActionIds,
+    model_request_errors: modelRequestErrors,
+    invalid_model_outputs: modelParseErrors + modelInvalidActionIds,
+    stale_windows: staleWindows,
     engine_rejections: events.reduce((sum, event) => sum + Number(event['engine_rejections'] ?? 0), 0),
+    engine_rejection_reasons: engineRejectionReasons,
     retries: events.reduce((sum, event) => sum + Number(event['retry_count'] ?? 0), 0),
     illegal_actions: events.reduce((sum, event) => sum + Number(event['engine_rejections'] ?? 0), 0),
     fallback_actions: events.filter((event) => event['fallback'] === true).length,
