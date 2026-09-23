@@ -113,6 +113,8 @@ export interface AiViewSnapshot {
   pending: {
     target: number;
     isBlocking: boolean;
+    mandatory?: boolean;
+    responseMode?: 'normal' | 'silent';
     promptTitle: string;
     requestType: string;
     /** 选将询问时的候选武将列表（仅选将 pending 非空） */
@@ -123,6 +125,14 @@ export interface AiViewSnapshot {
      *  index+name 供 AI 可读。bug 回归:此前只透传 选将询问 的 candidates,
      *  choosePlayer 候选丢失 → AI 经 MCP 看不到可选目标。 */
     playerCandidates?: Array<{ index: number; name: string }>;
+    /** 当前座位可见的选牌数量和牌面，仅供本地 adapter 生成具体合法动作。 */
+    cardSelection?: {
+      min: number;
+      max: number;
+      candidates: Array<{ id: string; name: string; suit: string; rank: string | number; type: string }>;
+    };
+    /** choosePlayer 多选窗口的选择数量范围。 */
+    targetSelection?: { min: number; max: number };
   } | null;
   zones: { deckCount: number; discardPileCount: number };
   log: { time: number; player: number; text: string }[];

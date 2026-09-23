@@ -18,6 +18,9 @@ export interface PlayState {
 export interface PlayInput {
   /** 要执行的操作；省略=纯等待。 */
   action?: { message: EngineClientMessage };
+  /** Submit the action and return as soon as the server processes it, without waiting
+   * for this same seat's next decision. Intended for multi-seat external schedulers. */
+  returnAfterAction?: boolean;
   /** 等待上限(ms)，默认 Infinity（无限阻塞直到 needsAction/gameOver）。
    *  服务端自有 pending 超时推进状态；仅在需要主动上限保护时传有限值。 */
   waitTimeoutMs?: number;
@@ -65,6 +68,7 @@ export interface PlayResult {
 // runPlay 的 tick 每 TICK_MS 检查即可在 ended/needsAction 时返回。固定 deadline
 // 只在异常兜底时有意义——默认不设，由调用方按需传 waitTimeoutMs 设上限。
 const TICK_MS = 20;
+const registeredSkillSets = new WeakMap<HeadlessGameClient, Set<string>>();
 
 export async function runPlay(hgc: HeadlessGameClient, input: PlayInput): Promise<PlayResult> {
   let lastActionResult: PlayResult['lastActionResult'] = 'not-applicable';
@@ -80,12 +84,16 @@ export async function runPlay(hgc: HeadlessGameClient, input: PlayInput): Promis
     lastActionResult = 'accepted';
   }
   // 自动注册技能：选将后 view 有 character + skills 但 registry 可能未注册。
-  // 每次调 play 时检查并补注册（幂等：registerSkillActions 重复调用无害）。
+  // 每个客户端按座位/技能集合缓存，避免每次模型决策重复注册整套技能。
   const v = hgc.view;
   if (v) {
+    const registered = registeredSkillSets.get(hgc) ?? new Set<string>();
+    registeredSkillSets.set(hgc, registered);
     for (const p of v.players) {
-      if (p.character && p.skills.length > 0) {
+      const skillKey = `${p.index}:${[...p.skills].sort().join('\u0000')}`;
+      if (p.character && p.skills.length > 0 && !registered.has(skillKey)) {
         await hgc.loadSkillActions(p.skills, p.index);
+        registered.add(skillKey);
       }
     }
   }
@@ -160,6 +168,7 @@ export async function runPlay(hgc: HeadlessGameClient, input: PlayInput): Promis
           return;
         }
       }
+      if (submittedAction && input.returnAfterAction) return settle();
       // lobby/connecting 阶段：周期推进（房主开局）并阻塞等待进入 playing，
       // 而非立即返回——避免 agent 在游戏未开始时空轮询浪费 token。
       if (hgc.phase === 'connecting' || hgc.phase === 'lobby') {

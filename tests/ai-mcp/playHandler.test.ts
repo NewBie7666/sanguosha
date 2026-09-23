@@ -76,6 +76,25 @@ describe('runPlay', () => {
     expect(res.lastActionResult).toBe('accepted');
   });
 
+  it('外部多座位 scheduler 可在服务器处理 action 后立即返回', async () => {
+    let seq = 0;
+    const fake = makeFake({
+      needsAction: () => false,
+      sendAction: vi.fn(() => {
+        setTimeout(() => { seq = 1; }, 5);
+      }),
+    });
+    Object.defineProperty(fake, 'lastSeq', { get: () => seq, configurable: true });
+    const action: EngineClientMessage = {
+      skillId: '杀', actionType: 'use', ownerId: 0, params: { cardId: 'c1', targets: [1] }, baseSeq: 0,
+    };
+    const start = Date.now();
+    const result = await runPlay(fake, { action: { message: action }, returnAfterAction: true });
+    expect(Date.now() - start).toBeLessThan(100);
+    expect(result.lastActionResult).toBe('accepted');
+    expect(result.needsAction).toBe(false);
+  });
+
   it('action 提交后服务端未处理(seq 未推进)时不立即返回 pre-action 旧视图', async () => {
     // 回归:sendAction 是 fire-and-forget 的 HTTP POST。旧实现首个同步 tick 看到的仍是
     // pre-action 视图(needsAction 仍为提交前的 true)→ 立即返回 accepted + 旧手牌,

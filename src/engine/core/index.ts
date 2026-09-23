@@ -327,7 +327,8 @@ export async function dispatch(state: GameState, message: ClientMessage): Promis
     return { accepted: false, settle };
   };
   const accept = (): DispatchResult => ({ accepted: true, settle });
-  // 排空微任务直到 settle(execute resume 后创建 slot 触发 onExecuteSettle)或预算耗尽。
+  // 让出事件循环直到 settle(execute resume 后创建 slot 触发 onExecuteSettle)或预算耗尽。
+  // 使用 setImmediate，避免 Windows 上 setTimeout(0) 的计时器粒度把排空放大到数秒。
   // skip 触发超时的路径需要:fireTimeoutNow resolve 广播/阻塞 slot → 父 execute 跨微任务
   // resume 到下一挂起点;若不等它,restore 的下一条 action 会在 resume 创建的新 slot
   // 出现前被 validate 拒绝(与下方 respond 路径的 settleAfterDrain 同理)。
@@ -336,7 +337,7 @@ export async function dispatch(state: GameState, message: ClientMessage): Promis
   // 排空只影响 settle 信号时机,不触碰任何游戏状态,不破坏重放确定性。
   const drainUntilSettled = async (): Promise<void> => {
     for (let i = 0; i < 1000 && !settled; i++) {
-      await new Promise((r) => setTimeout(r, 0));
+      await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
     }
   };
 

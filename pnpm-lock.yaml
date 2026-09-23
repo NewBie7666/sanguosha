@@ -29,6 +29,9 @@ importers:
       hono:
         specifier: ^4.12.18
         version: 4.12.23
+      js-yaml:
+        specifier: 4.1.1
+        version: 4.1.1
       lottie-web:
         specifier: ^5.13.0
         version: 5.13.0

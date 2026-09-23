@@ -65,15 +65,29 @@ function logErr(msg: string): void {
 
 type StartedRole = 'host' | 'guest' | 'spectator';
 
-function buildRoomConfig(opts: { timeoutSec?: number; name?: string }, defaultName: string): RoomConfig | undefined {
-  if (opts.timeoutSec === undefined && opts.name === undefined) return undefined;
+function buildRoomConfig(
+  opts: {
+    timeoutSec?: number;
+    name?: string;
+    gameMode?: RoomConfig['gameMode'];
+    seed?: number;
+    charPool?: RoomConfig['charPool'];
+    handSize?: number;
+  },
+  defaultName: string,
+): RoomConfig | undefined {
+  if (
+    opts.timeoutSec === undefined && opts.name === undefined &&
+    opts.gameMode === undefined && opts.seed === undefined && opts.charPool === undefined && opts.handSize === undefined
+  ) return undefined;
   return {
     name: opts.name ?? defaultName,
     timeoutSec: opts.timeoutSec ?? 30,
-    charPool: 'all',
-    handSize: 4,
+    charPool: opts.charPool ?? 'all',
+    handSize: opts.handSize ?? 4,
     chat: DEFAULT_CHAT_CONFIG,
-    gameMode: '身份局',
+    gameMode: opts.gameMode ?? '身份局',
+    ...(Number.isSafeInteger(opts.seed) && (opts.seed ?? -1) >= 0 ? { seed: opts.seed } : {}),
   };
 }
 

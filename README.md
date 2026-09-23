@@ -47,6 +47,24 @@ pnpm server       # 独立运行后端服务器
 | `PORT` | `3930` | 服务器端口 |
 | `HOST` | `true` | 绑定地址（`true` = 所有网卡） |
 
+## 本地大模型 AI 对战实验
+
+本仓库可用于验证两个独立 AI 会话、OpenAI-compatible endpoint、观察信息隔离和对局日志闭环。**它不是游卡官方三国杀规则引擎**：仓库自带的 `1v1` 是双人主公对反贼、单名武将先死亡即负；官方“至尊 1v1”包含双方各 3 名武将依次出战、专属将池/牌堆及平衡调整。因此这里产生的胜率和轨迹只代表 `wmzy/sanguosha` 这个模拟引擎，不能作为官方游戏表现结论。要用于官方客户端，未来需要独立实现并验证针对官方目标版本/模式的 `GameAdapter`。
+
+首次运行前安装依赖，并确认两个本地模型服务分别提供 OpenAI-compatible `/v1/chat/completions` 接口：
+
+```bash
+pnpm install
+# 在另一终端启动模型服务，例如分别监听 8001 和 8002
+pnpm match -- --config config/match.example.yaml --games 1 --seed 42 --headless
+```
+
+编辑 `config/match.example.yaml` 中 `profiles.qwen-a` / `profiles.qwen-b` 的 `base_url` 和 `model`，或用 `AI_A_API_KEY`、`AI_B_API_KEY` 设置密钥。A、B 使用独立 MCP 子进程和独立请求历史；游戏服务默认自动启动在 `3930` 端口。第一阶段只支持单局。若服务器已经运行，runner 会复用它。
+
+每局输出到 `runs/<时间>_game001/`：`config.json`（API key 脱敏）、`game.jsonl`（每次决策的玩家 observation、合法动作、请求/回复、动作结果、延迟和 token）及 `summary.json` / `summary.md`。模型请求仅使用白名单 `PlayerObservation`，不发送服务端完整状态、`cardMap` 或原始事件日志。无效输出会重试，之后从当前安全具体化的动作中确定性兜底。
+
+若要在上游 MCP 开发模式下单独连接客户端，见下方“AI agent 接入”；上面的 `pnpm match` 是本地模型 self-play 的入口。
+
 ## AI agent 接入
 
 让 AI agent（Claude Code / Cursor / Codex / Windsurf 等）通过 MCP server 接管三国杀对局。

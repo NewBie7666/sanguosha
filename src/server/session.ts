@@ -122,7 +122,7 @@ export class GameSession {
     this.roomName = room.name;
     this.maxPlayers = room.maxPlayers;
     this.debug = debug;
-    this.sessionSeed = sessionSeed ?? Date.now();
+    this.sessionSeed = sessionSeed ?? room.config.seed ?? Date.now();
   }
 
   /** 局标识:每局唯一(startGame/restoreState 各自设置的 gameStartedAt)。
@@ -486,7 +486,7 @@ export class GameSession {
     // 裁剪水位归零(下一局 startGame 也会重置;此处先复位避免残留影响判空)
     this.trimmedFloorSeq = 0;
     // 重新生成 seed,新一局随机序列不同
-    this.sessionSeed = Date.now();
+    this.sessionSeed = this.room.config.seed ?? Date.now();
     setRoomStatus(this.room.id, '等待中');
     this.room.readyPlayers.clear();
     // 清除旧持久化数据,避免重启时恢复到已结束的局面

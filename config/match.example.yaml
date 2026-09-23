@@ -1,0 +1,39 @@
+server:
+  base_url: http://127.0.0.1:3930
+  auto_start: true
+  port: 3930
+  startup_timeout_ms: 60000
+
+game:
+  mode: 1v1
+  seed: 42
+  timeout_sec: 30
+  char_pool: standard
+  hand_size: 4
+
+run:
+  games: 1
+  max_retries: 2
+  max_decisions: 2000
+  output_dir: runs
+  fallback: first
+
+profiles:
+  qwen-a:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:8001/v1
+    model: qwen-local
+    api_key: "${AI_A_API_KEY:-dummy}"
+    temperature: 0.2
+    timeout_ms: 120000
+  qwen-b:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:8002/v1
+    model: qwen-local
+    api_key: "${AI_B_API_KEY:-dummy}"
+    temperature: 0.2
+    timeout_ms: 120000
+
+players:
+  a: qwen-a
+  b: qwen-b

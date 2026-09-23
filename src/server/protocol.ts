@@ -76,6 +76,8 @@ export interface RoomConfig {
   chat: ChatConfig;
   /** 游戏模式(规则包):身份局 / 1v1。默认身份局。 */
   gameMode: GameMode;
+  /** Optional deterministic RNG seed used by the next game started in this room. */
+  seed?: number;
 }
 
 /** 默认房间配置 */
@@ -146,7 +148,11 @@ export function normalizeRoomConfig(raw: unknown): RoomConfig {
     typeof rawMode === 'string' && (GAME_MODES as readonly string[]).includes(rawMode)
       ? (rawMode as GameMode)
       : DEFAULT_ROOM_CONFIG.gameMode;
-  return { name, timeoutSec, charPool, handSize, chat, gameMode };
+  const seed =
+    typeof r['seed'] === 'number' && Number.isSafeInteger(r['seed']) && r['seed'] >= 0
+      ? r['seed']
+      : undefined;
+  return { name, timeoutSec, charPool, handSize, chat, gameMode, ...(seed !== undefined ? { seed } : {}) };
 }
 
 /** 倒计时信息(pending 优先,否则出牌/弃牌阶段的 idleDeadline)。

@@ -97,7 +97,7 @@ export async function joinAndReady(
   }
   const joinDeadline = Date.now() + 10_000;
   await waitFor(() => hgc.playerId !== null, joinDeadline, '加入房间超时');
-  hgc.sendReady();
+  await hgc.sendReady(true);
   const rs = hgc.roomState;
   return {
     roomId: hgc.roomId ?? '',
@@ -126,7 +126,7 @@ export async function advanceToStart(
   if (!isAllReady(hgc)) return false;
   const rs = hgc.roomState;
   if (rs?.hostId === hgc.playerId) {
-    hgc.sendStartGame();
+    await hgc.sendStartGame(true);
   }
   const startDeadline = Date.now() + 15_000;
   await waitFor(() => isPlaying(hgc), startDeadline, '开局超时', false);
@@ -151,7 +151,7 @@ export function createLobbyAdvancer(hgc: HeadlessGameClient): () => void {
     startRequested = true;
     const rs = hgc.roomState;
     if (rs?.hostId && rs.hostId === hgc.playerId) {
-      void hgc.sendStartGame();
+      void hgc.sendStartGame(true).catch(() => undefined);
     }
   };
 }
@@ -184,7 +184,7 @@ export async function joinAndStartRoom(
   await waitFor(() => hgc.playerId !== null, joinDeadline, '加入房间超时');
 
   // 3. 准备
-  hgc.sendReady();
+  await hgc.sendReady(true);
 
   // 4. 等待全员就绪(超时静默返回 lobby,由调用方决定后续)
   const readyDeadline = Date.now() + (opts.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS);
@@ -203,7 +203,7 @@ export async function joinAndStartRoom(
   const rs = hgc.roomState;
   const isHost = rs?.hostId === hgc.playerId;
   if (isHost) {
-    hgc.sendStartGame();
+    await hgc.sendStartGame(true);
   }
 
   // 6. 等开局（phase→playing）

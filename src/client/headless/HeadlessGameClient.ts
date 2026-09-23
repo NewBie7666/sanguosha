@@ -1048,12 +1048,18 @@ export class HeadlessGameClient {
   private async postAction(action: EngineClientMessage): Promise<void> {
     if (!this._roomId || !this._playerId) return;
     try {
-      await fetch(`${this.baseUrl}/api/rooms/${this._roomId}/action`, {
+      const response = await this.authFetch(`${this.baseUrl}/api/rooms/${this._roomId}/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ playerId: this._playerId, action }),
       });
+      if (!response.ok) {
+        this._lastActionRejected = true;
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        this.callbacks.onError?.(new Error(body.error ?? `提交动作失败(${response.status})`));
+      }
     } catch (err) {
+      this._lastActionRejected = true;
       this.callbacks.onError?.(err instanceof Error ? err : new Error(String(err)));
     }
   }
@@ -1212,20 +1218,20 @@ export class HeadlessGameClient {
 
   // ── 大厅 ──
 
-  async sendReady(): Promise<void> {
-    await this.postRoomOp('ready');
+  async sendReady(strict = false): Promise<void> {
+    await this.postRoomOp('ready', strict);
   }
 
-  async sendCancelReady(): Promise<void> {
-    await this.postRoomOp('cancel-ready');
+  async sendCancelReady(strict = false): Promise<void> {
+    await this.postRoomOp('cancel-ready', strict);
   }
 
-  async sendStartGame(): Promise<void> {
-    await this.postRoomOp('start');
+  async sendStartGame(strict = false): Promise<void> {
+    await this.postRoomOp('start', strict);
   }
 
-  async sendRestart(): Promise<void> {
-    await this.postRoomOp('restart');
+  async sendRestart(strict = false): Promise<void> {
+    await this.postRoomOp('restart', strict);
   }
 
   /** 发送聊天消息 */
@@ -1270,10 +1276,10 @@ export class HeadlessGameClient {
   }
 
   /** POST 通用房间操作（ready/start/restart） */
-  private async postRoomOp(op: string): Promise<void> {
+  private async postRoomOp(op: string, strict = false): Promise<void> {
     if (!this._roomId || !this._playerId) return;
     try {
-      const resp = await fetch(`${this.baseUrl}/api/rooms/${this._roomId}/${op}`, {
+      const resp = await this.authFetch(`${this.baseUrl}/api/rooms/${this._roomId}/${op}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ playerId: this._playerId }),
@@ -1282,10 +1288,14 @@ export class HeadlessGameClient {
       // 否则前端静默吞掉表现为「点击无响应」。
       if (!resp.ok) {
         const body = (await resp.json().catch(() => ({}))) as { error?: string };
-        this.callbacks.onError?.(new Error(body.error ?? `${op} 失败(${resp.status})`));
+        const error = new Error(body.error ?? `${op} 失败(${resp.status})`);
+        this.callbacks.onError?.(error);
+        if (strict) throw error;
       }
     } catch (err) {
-      this.callbacks.onError?.(err instanceof Error ? err : new Error(String(err)));
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (strict) throw error;
+      this.callbacks.onError?.(error);
     }
   }
 

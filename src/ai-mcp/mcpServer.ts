@@ -56,6 +56,10 @@ export const CREATE_ROOM_TOOL = {
         type: 'number',
         description: '操作倒计时秒数(绝对值)。30=默认；0=无限等待',
       },
+      gameMode: { type: 'string', enum: ['1v1', '身份局'], description: '游戏模式，默认身份局' },
+      seed: { type: 'number', description: '非负整数随机种子，用于复现游戏环境' },
+      charPool: { type: 'string', enum: ['standard', 'extended', 'all'], description: '武将池预设，默认 all' },
+      handSize: { type: 'number', description: '开局手牌数，默认 4' },
     },
   },
 };
@@ -104,6 +108,7 @@ export const PLAY_TOOL = {
     '首次调用前必须先用 createRoom / joinRoom / spectateRoom 启动；' +
     '启动后持续调用 play（不带 action = 纯等待 / 推进 lobby→playing）。' +
     '默认无限等待（不轮询）；可选 waitTimeoutMs 设等待上限。' +
+    'returnAfterAction=true 可在服务端处理完 action 后立即返回，供多座位编排器使用。' +
     'action 从上次返回的 availableActions 取一条。',
   inputSchema: {
     type: 'object' as const,
@@ -122,6 +127,10 @@ export const PLAY_TOOL = {
       waitTimeoutMs: {
         type: 'number',
         description: '本次等待上限(ms)，默认 Infinity（无限等待直到 needsAction/gameOver）。',
+      },
+      returnAfterAction: {
+        type: 'boolean',
+        description: 'action 被服务端处理后立即返回，不等待本座位下次行动。',
       },
     },
   },
@@ -196,6 +205,10 @@ export interface CreateRoomOpts {
   maxPlayers?: number;
   playerId?: string;
   timeoutSec?: number;
+  gameMode?: '1v1' | '身份局';
+  seed?: number;
+  charPool?: 'standard' | 'extended' | 'all';
+  handSize?: number;
 }
 
 export interface JoinRoomOpts {
@@ -254,6 +267,12 @@ function parseCreateRoomOpts(args: unknown): CreateRoomOpts {
     maxPlayers: optNumber(o, 'maxPlayers'),
     playerId: optString(o, 'playerId'),
     timeoutSec: optNumber(o, 'timeoutSec'),
+    gameMode: o['gameMode'] === '1v1' || o['gameMode'] === '身份局' ? o['gameMode'] : undefined,
+    seed: optNumber(o, 'seed'),
+    charPool: o['charPool'] === 'standard' || o['charPool'] === 'extended' || o['charPool'] === 'all'
+      ? o['charPool']
+      : undefined,
+    handSize: optNumber(o, 'handSize'),
   };
 }
 
@@ -482,6 +501,7 @@ export async function handleMcpRequest(
               }
             : undefined,
           waitTimeoutMs: optNumber(args, 'waitTimeoutMs'),
+          returnAfterAction: args['returnAfterAction'] === true,
           state: ctx.playState,
           lobbyAdvance: ctx.lobbyAdvance,
         });

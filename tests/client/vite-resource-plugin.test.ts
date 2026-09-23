@@ -1,5 +1,6 @@
 // tests/client/vite-resource-plugin.test.ts
 import { describe, it, expect } from 'vitest';
+import { join } from 'node:path';
 import { buildPacksIndex, resolvePackFile } from '../../src/server/vite-resource-plugin';
 
 describe('vite-resource-plugin 纯函数', () => {
@@ -21,7 +22,7 @@ describe('vite-resource-plugin 纯函数', () => {
   it('resolvePackFile 防目录穿越，拒绝 .. 路径', () => {
     const packsRoot = '/project/public/packs';
     const safe = resolvePackFile(packsRoot, 'base', 'character/曹操.png');
-    expect(safe).toBe('/project/public/packs/base/character/曹操.png');
+    expect(safe).toBe(join(packsRoot, 'base', 'character', '曹操.png'));
     const evil = resolvePackFile(packsRoot, 'base', '../../../etc/passwd');
     expect(evil).toBeNull();
   });

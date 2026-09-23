@@ -3,7 +3,7 @@
 // projectView: 完整投影（getSnapshot 工具用）。
 // projectDiff: 两次投影之间的增量（play 工具用，降低 token）。
 // 纯函数。见 spec §4.4。
-import type { GameView } from '../engine/types';
+import type { Card, GameView } from '../engine/types';
 import type { AiViewSnapshot } from '../client/headless/types';
 import { getPendingRequestType } from '../client/utils/pendingRespond';
 
@@ -22,6 +22,40 @@ function readPlayerCandidates(
   const ids = prompt.candidates;
   if (!Array.isArray(ids)) return undefined;
   return ids.map((i) => ({ index: i, name: view.players[i]?.name ?? `P${i}` }));
+}
+
+/** 只为 viewer 自己的选牌窗口投影候选牌，不透出 pending atom 或函数过滤器。 */
+function readCardSelection(view: GameView): NonNullable<AiViewSnapshot['pending']>['cardSelection'] {
+  if (!view.pending || view.viewer < 0 || view.pending.target !== view.viewer) return undefined;
+  const prompt = view.pending?.prompt as
+    | { type?: string; cardFilter?: { min?: number; max?: number; candidates?: string[]; filter?: (card: Card) => boolean } }
+    | undefined;
+  if ((prompt?.type !== 'useCard' && prompt?.type !== 'useCardAndTarget') || !prompt.cardFilter) {
+    return undefined;
+  }
+  const filter = prompt.cardFilter;
+  const candidateIds = filter.candidates ? new Set(filter.candidates) : null;
+  const selfCards = view.players[view.viewer]?.hand ?? [];
+  const candidates = (candidateIds
+    ? [...candidateIds].map((id) => view.cardMap[id]).filter(Boolean)
+    : filter.filter
+      ? selfCards.filter(filter.filter)
+      : selfCards
+  ).map(({ id, name, suit, rank, type }) => ({ id, name, suit, rank, type }));
+  return {
+    min: Math.max(0, filter.min ?? 1),
+    max: Math.max(filter.min ?? 1, filter.max ?? 1),
+    candidates,
+  };
+}
+
+function readTargetSelection(view: GameView): NonNullable<AiViewSnapshot['pending']>['targetSelection'] {
+  if (!view.pending || view.viewer < 0 || view.pending.target !== view.viewer) return undefined;
+  const prompt = view.pending?.prompt as
+    | { type?: string; min?: number; max?: number }
+    | undefined;
+  if (prompt?.type !== 'choosePlayer') return undefined;
+  return { min: Math.max(0, prompt.min ?? 1), max: Math.max(prompt.min ?? 1, prompt.max ?? 1) };
 }
 
 /** 完整视图投影。getSnapshot 工具调用。 */
@@ -51,6 +85,8 @@ export function projectView(view: GameView): AiViewSnapshot {
       ? {
           target: view.pending.target,
           isBlocking: view.pending.isBlocking !== false,
+          ...(view.pending.mandatory !== undefined ? { mandatory: view.pending.mandatory } : {}),
+          ...(view.pending.responseMode ? { responseMode: view.pending.responseMode } : {}),
           promptTitle:
             (view.pending.prompt as { title?: string }).title ?? view.pending.prompt.type,
           requestType: getPendingRequestType(view.pending),
@@ -70,6 +106,8 @@ export function projectView(view: GameView): AiViewSnapshot {
           // bug 回归:此前此处只透传 选将询问 的 candidates,choosePlayer 候选丢失 →
           // AI 经 MCP 看不到可选目标。与 marks 丢失 bug 同类。
           playerCandidates: readPlayerCandidates(view),
+          cardSelection: readCardSelection(view),
+          targetSelection: readTargetSelection(view),
         }
       : null,
     zones: view.zones
