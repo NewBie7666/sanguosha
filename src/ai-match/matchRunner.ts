@@ -1,17 +1,20 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { buildLegalActions, chooseDeterministicFallback, parseActionId, resolveActionId, toPublicLegalActions } from './legalActions';
+import { buildLegalActionsWithCoverage, chooseDeterministicFallback, parseActionId, resolveActionId, toPublicLegalActions } from './legalActions';
 import { McpProcess } from './mcpProcess';
 import { buildPlayerObservation } from './observation';
 import { getUsageTotals, OpenAICompatibleProvider } from './provider';
 import { redactConfig } from './config';
 import type {
   LegalAction,
+  LegalActionCoverage,
   MatchConfig,
   ModelProvider,
+  PlayerObservation,
   ProviderRequest,
   ProviderResponse,
+  PublicHistoryEntry,
 } from './types';
 import type { AiViewSnapshot, AvailableAction } from '../client/headless/types';
 
@@ -114,6 +117,69 @@ function attemptUsage(attempts: LoggedAttempt[]): ProviderResponse[] {
   return attempts.flatMap((attempt) => attempt.response ? [attempt.response] : []);
 }
 
+function collectRelevantRuleNames(observation: PlayerObservation, actions: LegalAction[]): string[] {
+  const names = new Set<string>();
+  for (const player of observation.players) {
+    for (const skill of player.skills) if (skill.trim()) names.add(skill.trim());
+  }
+  for (const card of observation.self.hand) if (card.name.trim()) names.add(card.name.trim());
+  for (const action of actions) {
+    for (const match of action.description.matchAll(/【([^】]+)】/g)) {
+      const name = match[1]?.trim();
+      if (name) names.add(name);
+    }
+  }
+  return [...names].slice(0, 32);
+}
+
+async function buildRelevantRules(
+  client: McpProcess,
+  observation: PlayerObservation,
+  actions: LegalAction[],
+  cache: Map<string, string | null>,
+): Promise<Record<string, string>> {
+  const names = collectRelevantRuleNames(observation, actions);
+  const missing = names.filter((name) => !cache.has(name));
+  if (missing.length > 0) {
+    const result = await client.callTool<{ skills: Array<{ name: string; description: string | null }> }>(
+      'getSkillInfo',
+      { names: missing },
+    );
+    for (const item of result.skills) cache.set(item.name, item.description);
+    for (const name of missing) if (!cache.has(name)) cache.set(name, null);
+  }
+  return Object.fromEntries(
+    names.flatMap((name) => {
+      const description = cache.get(name);
+      return description ? [[name, description] as const] : [];
+    }),
+  );
+}
+
+function publishableHistoryAction(action: LegalAction): boolean {
+  // Character choice can be hidden until reveal; never share it cross-seat from the runner.
+  return action.category !== 'selectChar';
+}
+
+function sumCoverage(events: Array<Record<string, unknown>>): LegalActionCoverage {
+  const totals = events.reduce(
+    (acc, event) => {
+      const coverage = event['legal_action_coverage'] as LegalActionCoverage | undefined;
+      if (!coverage) return acc;
+      acc.total_templates += coverage.total_templates;
+      acc.supported_templates += coverage.supported_templates;
+      acc.unsupported_templates += coverage.unsupported_templates;
+      acc.concrete_actions += coverage.concrete_actions;
+      return acc;
+    },
+    { total_templates: 0, supported_templates: 0, unsupported_templates: 0, concrete_actions: 0 },
+  );
+  return {
+    ...totals,
+    coverage_ratio: totals.total_templates === 0 ? 1 : totals.supported_templates / totals.total_templates,
+  };
+}
+
 function makeSummaryMarkdown(summary: Record<string, unknown>): string {
   const tokens = summary['tokens'] as { a?: number; b?: number } | undefined;
   return [
@@ -132,6 +198,8 @@ function makeSummaryMarkdown(summary: Record<string, unknown>): string {
     `- Token：A=${tokens?.a ?? 0}；B=${tokens?.b ?? 0}`,
     `- 平均模型延迟：${summary['average_latency_ms']} ms`,
     `- 非法模型输出：${summary['invalid_model_outputs']}；引擎拒绝：${summary['engine_rejections']}；fallback：${summary['fallback_actions']}`,
+    `- 可训练决策：${summary['training_eligible_steps']} / ${summary['decision_steps']}`,
+    `- LegalAction 模板覆盖率：${((summary['legal_action_coverage'] as LegalActionCoverage | undefined)?.coverage_ratio ?? 0) * 100}%`,
     ...(typeof summary['error'] === 'string' ? ['', `错误：${summary['error']}`] : []),
     '',
   ].join('\n');
@@ -159,6 +227,8 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
     b: dependencies.providers?.b ?? new OpenAICompatibleProvider(config.players.b),
   };
   const privateHistory: Record<Seat, Array<{ phase: string; action: string }>> = { a: [], b: [] };
+  const publicHistory: PublicHistoryEntry[] = [];
+  const ruleCache = new Map<string, string | null>();
   const mcp: Partial<Record<Seat, McpProcess>> = {};
   let serverChild: ChildProcess | null = null;
   const events: Array<Record<string, unknown>> = [];
@@ -235,7 +305,9 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
       }
       let latestObservation = buildPlayerObservation(currentSnapshot, config.game.mode);
       seatIndexes[arrived.seat] = latestObservation.seat;
-      let latestActions = buildLegalActions(currentResult.availableActions ?? [], currentSnapshot);
+      let actionBuild = buildLegalActionsWithCoverage(currentResult.availableActions ?? [], currentSnapshot);
+      let latestActions = actionBuild.actions;
+      let latestCoverage = actionBuild.coverage;
       const attempts: LoggedAttempt[] = [];
       const errors: string[] = [];
       let chosen: LegalAction | null = null;
@@ -267,16 +339,14 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           errors.push(`没有可安全具体化的合法动作；窗口=${JSON.stringify(window)}；模板=${JSON.stringify(templates)}`);
           break;
         }
+        const relevantRules = await buildRelevantRules(client, latestObservation, latestActions, ruleCache);
         const providerRequest: ProviderRequest = {
           seat: arrived.seat,
           observation: latestObservation,
-          legal_actions: latestActions.map(({ action_id, type, description, target_seat }) => ({
-            action_id,
-            type,
-            description,
-            ...(target_seat !== undefined ? { target_seat } : {}),
-          })),
+          legal_actions: toPublicLegalActions(latestActions),
+          recent_public_history: publicHistory.slice(-24),
           recent_private_history: privateHistory[arrived.seat].slice(-12),
+          relevant_rules: relevantRules,
           ...(errors.length ? { retry_error: errors[errors.length - 1] } : {}),
         };
         let attempt: LoggedAttempt = {
@@ -321,7 +391,9 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
             break;
           }
           latestObservation = buildPlayerObservation(currentSnapshot, config.game.mode);
-          latestActions = buildLegalActions(currentResult.availableActions ?? [], currentSnapshot);
+          actionBuild = buildLegalActionsWithCoverage(currentResult.availableActions ?? [], currentSnapshot);
+          latestActions = actionBuild.actions;
+          latestCoverage = actionBuild.coverage;
           continue;
         }
         break;
@@ -336,6 +408,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           player: arrived.seat,
           player_observation: latestObservation,
           legal_actions: toPublicLegalActions(latestActions),
+          legal_action_coverage: latestCoverage,
           model_request: attempts.map((attempt) => attempt.request ?? null),
           model_raw_response: attempts.map((attempt) => attempt.raw ?? null),
           parsed_action: lastSubmittedAction
@@ -346,6 +419,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           retry_count: Math.max(0, attempts.length - 1),
           engine_rejections: engineRejections,
           fallback: false,
+          training_eligible: false,
           action_result: 'stale_window',
           game_result_after_action: null,
           latency_ms: latencyOf(attempts),
@@ -375,7 +449,9 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           chosen = null;
           currentSnapshot = await snapshotFor(client);
           latestObservation = buildPlayerObservation(currentSnapshot, config.game.mode);
-          latestActions = buildLegalActions(currentResult.availableActions ?? [], currentSnapshot);
+          actionBuild = buildLegalActionsWithCoverage(currentResult.availableActions ?? [], currentSnapshot);
+          latestActions = actionBuild.actions;
+          latestCoverage = actionBuild.coverage;
         }
         if (!chosen) throw new Error(`模型重试和确定性兜底均无法提交动作: ${fallbackReason}`);
       }
@@ -388,6 +464,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         player: arrived.seat,
         player_observation: latestObservation,
         legal_actions: toPublicLegalActions(latestActions),
+        legal_action_coverage: latestCoverage,
         model_request: attempts.map((attempt) => attempt.request ?? null),
         model_raw_response: attempts.map((attempt) => attempt.raw ?? null),
         parsed_action: { action_id: chosen.action_id, description: chosen.description },
@@ -396,8 +473,9 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         retry_count: attempts.length > 0 ? attempts.length - 1 : 0,
         engine_rejections: engineRejections,
         fallback: !modelActionValid,
+        training_eligible: modelActionValid && engineRejections === 0 && currentResult.lastActionResult === 'accepted',
         ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
-        unsupported_action_count: Math.max(0, (currentResult.availableActions?.length ?? 0) - latestActions.length),
+        unsupported_action_count: latestCoverage.unsupported_templates,
         action_result: currentResult.lastActionResult,
         game_result_after_action: currentResult.gameOver,
         latency_ms: latencyOf(attempts),
@@ -406,6 +484,15 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
       };
       await writeEvent(event);
       privateHistory[arrived.seat].push({ phase: latestObservation.phase, action: chosen.description });
+      if (currentResult.lastActionResult === 'accepted' && publishableHistoryAction(chosen)) {
+        publicHistory.push({
+          round: latestObservation.round,
+          phase: latestObservation.phase,
+          actor: arrived.seat,
+          actor_seat: latestObservation.seat,
+          action: chosen.description,
+        });
+      }
       dependencies.onProgress?.(`决策 ${decisionStep}: ${arrived.seat} · ${chosen.description}`);
 
       if (currentResult.gameOver) {
@@ -441,6 +528,8 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
       ? Math.round(playerEvents.reduce((sum, event) => sum + Number(event['latency_ms'] ?? 0), 0) / playerEvents.length)
       : 0;
   };
+  const coverage = sumCoverage(events);
+  const trainingEligibleSteps = events.filter((event) => event['training_eligible'] === true).length;
   const summary: Record<string, unknown> = {
     status: completionStatus,
     engine_id: 'wmzy/sanguosha',
@@ -466,6 +555,9 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
     retries: events.reduce((sum, event) => sum + Number(event['retry_count'] ?? 0), 0),
     illegal_actions: events.reduce((sum, event) => sum + Number(event['engine_rejections'] ?? 0), 0),
     fallback_actions: events.filter((event) => event['fallback'] === true).length,
+    training_eligible_steps: trainingEligibleSteps,
+    training_excluded_steps: events.length - trainingEligibleSteps,
+    legal_action_coverage: coverage,
     key_actions: events.slice(-10).map((event) => ({ player: event['player'], action: (event['parsed_action'] as { description?: string })?.description })),
     ...(failure ? { error: failure } : {}),
   };

@@ -2,6 +2,33 @@ import type { ClientMessage } from '../engine/types';
 
 export type GameMode = '身份局' | '1v1';
 
+export type LegalActionCategory =
+  | 'play'
+  | 'respond'
+  | 'discard'
+  | 'selectChar'
+  | 'transform'
+  | 'distribute'
+  | 'skip';
+
+export interface PublicHistoryEntry {
+  round: number;
+  phase: string;
+  actor: 'a' | 'b';
+  actor_seat: number;
+  action: string;
+}
+
+export type RelevantRules = Record<string, string>;
+
+export interface LegalActionCoverage {
+  total_templates: number;
+  supported_templates: number;
+  unsupported_templates: number;
+  concrete_actions: number;
+  coverage_ratio: number;
+}
+
 export interface PublicPlayerObservation {
   seat: number;
   name: string;
@@ -45,6 +72,7 @@ export interface PlayerObservation {
 export interface LegalAction {
   action_id: string;
   type: string;
+  category: LegalActionCategory;
   description: string;
   target_seat?: number;
   message: ClientMessage;
@@ -93,7 +121,9 @@ export interface ProviderRequest {
   seat: 'a' | 'b';
   observation: PlayerObservation;
   legal_actions: PublicLegalAction[];
+  recent_public_history: PublicHistoryEntry[];
   recent_private_history: Array<{ phase: string; action: string }>;
+  relevant_rules: RelevantRules;
   retry_error?: string;
 }
 

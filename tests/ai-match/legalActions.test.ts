@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AiViewSnapshot, AvailableAction } from '../../src/client/headless/types';
 import {
   buildLegalActions,
+  buildLegalActionsWithCoverage,
   chooseDeterministicFallback,
   parseActionId,
   resolveActionId,
@@ -45,8 +46,30 @@ describe('合法动作适配', () => {
     ], snapshot());
     expect(actions).toHaveLength(1);
     expect(actions[0]?.target_seat).toBe(1);
+    expect(actions[0]?.category).toBe('play');
     expect(actions[0]?.message.params['targets']).toEqual([1]);
     expect(toPublicLegalActions(actions)[0]).not.toHaveProperty('message');
+  });
+
+  it('按模板统计安全具体化覆盖率，而不是拿 concrete action 数量倒推', () => {
+    const view = snapshot();
+    const card = view.players[0]?.hand?.[0];
+    if (!card) throw new Error('fixture card missing');
+    const supported = available('use', { cardId: 'slash-1', targets: [] }, { validTargets: [1] });
+    const unsupported = available('use', { cardId: 'slash-1', targets: [] }, {
+      description: '借刀杀人',
+      validTargets: [1],
+      message: { skillId: '借刀杀人', actionType: 'use', ownerId: 0, params: { cardId: 'slash-1', targets: [] }, baseSeq: 4 },
+    });
+    card.name = '杀';
+    const built = buildLegalActionsWithCoverage([supported, unsupported], view);
+    expect(built.coverage).toMatchObject({
+      total_templates: 2,
+      supported_templates: 1,
+      unsupported_templates: 1,
+      concrete_actions: 1,
+      coverage_ratio: 0.5,
+    });
   });
 
   it('不暴露没有安全具体化的复合动作模板', () => {

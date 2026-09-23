@@ -18,8 +18,10 @@ const input = {
       equipment_slots: [], skills: [], marks: [], hand: [{ name: '杀', suit: '♠', rank: '7', type: '基本牌' }] },
     players: [], pending: null, zones: { deck_count: 20, discard_count: 0 },
   },
-  legal_actions: [{ action_id: 'action_001', type: 'skip', description: '跳过' }],
+  legal_actions: [{ action_id: 'action_001', type: 'skip', category: 'skip', description: '跳过' }],
+  recent_public_history: [{ round: 1, phase: '出牌', actor: 'b', actor_seat: 1, action: '使用【杀】 → A' }],
   recent_private_history: [],
+  relevant_rules: { 杀: '出牌阶段，对攻击范围内的一名角色使用。' },
 } satisfies ProviderRequest;
 
 function completion(content: string): Response {
@@ -37,6 +39,10 @@ describe('OpenAI-compatible provider', () => {
     expect(result.raw_text).toBe('{"action_id":"action_001"}');
     expect(result.usage?.total_tokens).toBe(13);
     expect(result.request_body['response_format']).toMatchObject({ type: 'json_schema' });
+    const messages = result.request_body['messages'] as Array<{ role: string; content: string }>;
+    const promptContext = JSON.parse(messages.find((message) => message.role === 'user')?.content ?? '{}') as Record<string, unknown>;
+    expect(promptContext['recent_public_history']).toEqual(input.recent_public_history);
+    expect(promptContext['relevant_rules']).toEqual(input.relevant_rules);
     expect(JSON.stringify(result.request_body)).not.toContain('secret-token');
     expect(fetchImpl).toHaveBeenCalledWith(
       'http://127.0.0.1:8001/v1/chat/completions',

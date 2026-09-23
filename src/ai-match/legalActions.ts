@@ -1,6 +1,6 @@
 import type { AvailableAction, AiViewSnapshot } from '../client/headless/types';
 import type { Card, ClientMessage } from '../engine/types';
-import type { LegalAction, PublicLegalAction } from './types';
+import type { LegalAction, LegalActionCoverage, PublicLegalAction } from './types';
 
 type MessageParams = Record<string, unknown>;
 
@@ -177,27 +177,33 @@ function materialize(action: AvailableAction, snapshot: AiViewSnapshot): Array<{
   return [{ message: original, description: action.description }];
 }
 
-/** Build a safe subset of fully materialized actions from the engine's richer templates. */
-export function buildLegalActions(
+/** Build a safe subset of fully materialized actions and report template coverage. */
+export function buildLegalActionsWithCoverage(
   availableActions: AvailableAction[],
   snapshot: AiViewSnapshot,
-): LegalAction[] {
+): { actions: LegalAction[]; coverage: LegalActionCoverage } {
   const result: LegalAction[] = [];
   const seen = new Set<string>();
+  let supportedTemplates = 0;
+
   for (const candidate of availableActions) {
-    for (const concrete of materialize(candidate, snapshot)) {
+    const concreteActions = materialize(candidate, snapshot);
+    if (concreteActions.length > 0) supportedTemplates++;
+    for (const concrete of concreteActions) {
       const key = JSON.stringify(concrete.message);
       if (seen.has(key)) continue;
       seen.add(key);
       result.push({
         action_id: `action_${String(result.length + 1).padStart(3, '0')}`,
         type: concrete.message.actionType,
+        category: candidate.category,
         description: concrete.description,
         ...(concrete.targetSeat !== undefined ? { target_seat: concrete.targetSeat } : {}),
         message: concrete.message,
       });
     }
   }
+
   // Some viewer-scoped prompt variants lack an action template (for example a
   // non-mandatory response with no matching card). A pass is safe only when the
   // current seat owns a blocking, non-mandatory, non-silent prompt.
@@ -211,6 +217,7 @@ export function buildLegalActions(
     result.push({
       action_id: 'action_001',
       type: 'skip',
+      category: 'skip',
       description: '跳过当前可选回应',
       message: {
         skillId: '__skip',
@@ -221,7 +228,27 @@ export function buildLegalActions(
       },
     });
   }
-  return result;
+
+  const totalTemplates = availableActions.length;
+  const unsupportedTemplates = Math.max(0, totalTemplates - supportedTemplates);
+  return {
+    actions: result,
+    coverage: {
+      total_templates: totalTemplates,
+      supported_templates: supportedTemplates,
+      unsupported_templates: unsupportedTemplates,
+      concrete_actions: result.length,
+      coverage_ratio: totalTemplates === 0 ? 1 : supportedTemplates / totalTemplates,
+    },
+  };
+}
+
+/** Backward-compatible convenience wrapper used by existing callers/tests. */
+export function buildLegalActions(
+  availableActions: AvailableAction[],
+  snapshot: AiViewSnapshot,
+): LegalAction[] {
+  return buildLegalActionsWithCoverage(availableActions, snapshot).actions;
 }
 
 export function toPublicLegalActions(actions: LegalAction[]): PublicLegalAction[] {

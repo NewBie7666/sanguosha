@@ -9,7 +9,9 @@ import { runMatch } from '../../src/ai-match/matchRunner';
 interface MockRequest {
   seat?: string;
   observation?: { seat?: number; players?: Array<Record<string, unknown>> };
-  legal_actions?: Array<{ action_id: string; type: string; description: string }>;
+  legal_actions?: Array<{ action_id: string; type: string; category?: string; description: string }>;
+  recent_public_history?: Array<{ action?: string }>;
+  relevant_rules?: Record<string, string>;
 }
 
 interface MockEndpoint {
@@ -94,9 +96,13 @@ describe('match runner 完整闭环', () => {
       expect(endpointB.requests.length).toBeGreaterThan(0);
       expect(endpointA.requests.every((request) => request.seat === 'a')).toBe(true);
       expect(endpointB.requests.every((request) => request.seat === 'b')).toBe(true);
-      for (const request of [...endpointA.requests, ...endpointB.requests]) {
+      const allRequests = [...endpointA.requests, ...endpointB.requests];
+      expect(allRequests.every((request) => request.relevant_rules && typeof request.relevant_rules === 'object')).toBe(true);
+      expect(allRequests.some((request) => (request.recent_public_history?.length ?? 0) > 0)).toBe(true);
+      for (const request of allRequests) {
         expect(request.legal_actions?.every((action) => !('message' in action))).toBe(true);
         expect(JSON.stringify(request)).not.toContain('cardMap');
+        expect(JSON.stringify(request)).not.toContain('visible-card-id');
         expect(request.observation?.players?.every((player) => !('hand' in player))).toBe(true);
       }
 
@@ -108,6 +114,14 @@ describe('match runner 完整闭环', () => {
         .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
       expect(events).toHaveLength(Number(summary['decision_steps']));
       expect(events.at(-1)?.['game_result_after_action']).toBeTruthy();
+      expect(summary['legal_action_coverage']).toEqual(expect.objectContaining({
+        total_templates: expect.any(Number),
+        supported_templates: expect.any(Number),
+        unsupported_templates: expect.any(Number),
+        coverage_ratio: expect.any(Number),
+      }));
+      expect(Number(summary['training_eligible_steps'])).toBeGreaterThan(0);
+      expect(events.every((event) => event['legal_action_coverage'])).toBe(true);
       expect((await readdir(runDirectory)).sort()).toEqual(['config.json', 'game.jsonl', 'summary.json', 'summary.md']);
     } finally {
       await Promise.all([closeServer(endpointA.server), closeServer(endpointB.server)]);

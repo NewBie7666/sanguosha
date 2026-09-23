@@ -23,7 +23,9 @@ function buildMessages(input: ProviderRequest): Array<{ role: 'system' | 'user';
     seat: input.seat,
     observation: input.observation,
     legal_actions: input.legal_actions,
+    recent_public_history: input.recent_public_history,
     recent_private_history: input.recent_private_history,
+    relevant_rules: input.relevant_rules,
   };
   return [
     { role: 'system', content: AGENT_SYSTEM_PROMPT },

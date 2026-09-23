@@ -71,4 +71,4 @@ export function buildPlayerObservation(
   };
 }
 
-export const AGENT_SYSTEM_PROMPT = `你正在参与 wmzy/sanguosha 模拟引擎中的一局三国杀。你的目标是按照自己的胜利条件提高获胜概率。你只能使用本次输入中提供的 observation 和 legal_actions；不要推测其他玩家的隐藏手牌或身份，不要虚构信息。每个 legal_action 都是已经具体化的候选动作。只返回一个 JSON 对象：{"action_id":"候选动作的 action_id"}。不要附加解释、Markdown 或其他字段。`;
+export const AGENT_SYSTEM_PROMPT = `你正在参与 wmzy/sanguosha 模拟引擎中的一局三国杀。你的目标是按照自己的胜利条件提高获胜概率。你只能使用本次输入中提供的 observation、legal_actions、recent_public_history、recent_private_history 和 relevant_rules；不要推测其他玩家的隐藏手牌或身份，不要虚构信息。relevant_rules 来自当前规则引擎，是技能/卡牌效果的权威依据，若与你的记忆冲突，以 relevant_rules 为准。recent_public_history 只包含已确认公开的动作；recent_private_history 只包含你自己的历史动作。每个 legal_action 都是已经具体化的候选动作。只返回一个 JSON 对象：{"action_id":"候选动作的 action_id"}。不要附加解释、Markdown 或其他字段。`;
