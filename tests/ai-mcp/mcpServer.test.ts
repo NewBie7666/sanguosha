@@ -434,18 +434,25 @@ describe('handleMcpRequest', () => {
       log: [],
       zones: { deckCount: 120, discardPileCount: 0, processing: [] },
     } as unknown as Parameters<typeof import('../../src/ai-mcp/viewProjector').projectView>[0];
-    const ctx = makeCtx(makeFakeHgc({ view: stubView }));
+    const snapshotActions = [
+      { description: '结束出牌阶段', message: {} as never, validTargets: [], category: 'play' as const },
+    ];
+    const ctx = makeCtx(makeFakeHgc({ view: stubView, getAvailableActions: () => snapshotActions }));
     const res = await handleMcpRequest(
       { jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'getSnapshot', arguments: {} } },
       ctx,
     );
     const result = res!.result as {
       content: { text: string }[];
-      structuredContent: { view: { viewer: number; players: unknown[] } | null };
+      structuredContent: {
+        view: { viewer: number; players: unknown[] } | null;
+        availableActions: unknown[];
+      };
     };
     expect(result.structuredContent.view).not.toBeNull();
     expect(result.structuredContent.view!.viewer).toBe(0);
     expect(result.structuredContent.view!.players).toHaveLength(1);
+    expect(result.structuredContent.availableActions).toEqual(snapshotActions);
     expect(result.content[0].text).toContain('刘备');
   });
 
@@ -455,8 +462,9 @@ describe('handleMcpRequest', () => {
       { jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'getSnapshot', arguments: {} } },
       ctx,
     );
-    const result = res!.result as { structuredContent: { view: null } };
+    const result = res!.result as { structuredContent: { view: null; availableActions: unknown[] } };
     expect(result.structuredContent.view).toBeNull();
+    expect(result.structuredContent.availableActions).toEqual([]);
   });
 
   it('通知（无 id）返回 null', async () => {

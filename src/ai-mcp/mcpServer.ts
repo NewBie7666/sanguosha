@@ -453,8 +453,12 @@ export async function handleMcpRequest(
 
         // ── 只读辅助工具 ──
         if (toolName === 'getSnapshot') {
+          // Keep view + availableActions in the same synchronous state sample.
+          // The match runner must not combine an old play() action list with a
+          // newer snapshot because pending windows can advance between calls.
           const view = ctx.hgc.view ? projectView(ctx.hgc.view) : null;
-          return okResponse(id, { view });
+          const availableActions = ctx.hgc.isSpectator ? [] : ctx.hgc.getAvailableActions();
+          return okResponse(id, { view, availableActions });
         }
         if (toolName === 'getSkillInfo') {
           const results = await getSkillInfoResult(params.arguments?.names);

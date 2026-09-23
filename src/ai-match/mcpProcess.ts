@@ -34,13 +34,22 @@ export class McpProcess {
     child.on('error', (error) => this.failPending(error));
     child.on('exit', (code, signal) => {
       this.closed = true;
-      this.failPending(new Error(`MCP process exited (${code ?? signal})${this.stderr ? `\n${this.stderr}` : ''}`));
+      const exitLabel = typeof code === 'number' && code > 255
+        ? `${code} / 0x${code.toString(16).toUpperCase()}`
+        : String(code ?? signal);
+      this.failPending(new Error(`MCP process exited (${exitLabel})${this.stderr ? `\n${this.stderr}` : ''}`));
     });
   }
 
   static start(serverUrl: string, seat: 0 | 1, cwd = process.cwd()): McpProcess {
     const entry = path.resolve(cwd, 'src/ai-mcp/server.ts');
-    const child = spawn(process.execPath, ['--import', 'tsx', entry], {
+    // Windows + recent V8/Node builds have a known Maglev fail-fast crash class
+    // (0xC0000409). Self-play values long-lived stability over JIT warmup speed, so
+    // disable Maglev for MCP children by default on Windows. Set
+    // SGS_MCP_DISABLE_MAGLEV=0 to opt out for diagnosis.
+    const disableMaglev = process.platform === 'win32' && process.env.SGS_MCP_DISABLE_MAGLEV !== '0';
+    const nodeArgs = [...(disableMaglev ? ['--no-maglev'] : []), '--import', 'tsx', entry];
+    const child = spawn(process.execPath, nodeArgs, {
       cwd,
       env: {
         ...process.env,

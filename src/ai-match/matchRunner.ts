@@ -93,10 +93,21 @@ async function stopChild(child: ChildProcess | null): Promise<void> {
   ]);
 }
 
-async function snapshotFor(client: McpProcess): Promise<AiViewSnapshot> {
-  const result = await client.callTool<{ view: AiViewSnapshot | null }>('getSnapshot', {});
+interface DecisionSnapshot {
+  view: AiViewSnapshot;
+  availableActions: AvailableAction[];
+}
+
+async function snapshotFor(client: McpProcess): Promise<DecisionSnapshot> {
+  const result = await client.callTool<{
+    view: AiViewSnapshot | null;
+    availableActions?: AvailableAction[];
+  }>('getSnapshot', {});
   if (!result.view) throw new Error('MCP snapshot is empty before the decision window');
-  return result.view;
+  return {
+    view: result.view,
+    availableActions: result.availableActions ?? [],
+  };
 }
 
 function snapshotNeedsDecision(snapshot: AiViewSnapshot): boolean {
@@ -327,7 +338,9 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
 
       const client = mcp[arrived.seat]!;
       let currentResult = initialResult;
-      let currentSnapshot = await snapshotFor(client);
+      let decisionSnapshot = await snapshotFor(client);
+      let currentSnapshot = decisionSnapshot.view;
+      let currentAvailableActions = decisionSnapshot.availableActions;
       // A second MCP seat can advance the room between this play() response and
       // getSnapshot(). Never send a stale prompt to the model or submit an action
       // against a pending window now owned by the opponent.
@@ -337,7 +350,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
       }
       let latestObservation = buildPlayerObservation(currentSnapshot, config.game.mode);
       seatIndexes[arrived.seat] = latestObservation.seat;
-      let actionBuild = buildLegalActionsWithCoverage(currentResult.availableActions ?? [], currentSnapshot);
+      let actionBuild = buildLegalActionsWithCoverage(currentAvailableActions, currentSnapshot);
       let latestActions = actionBuild.actions;
       let latestCoverage = actionBuild.coverage;
       const attempts: LoggedAttempt[] = [];
@@ -363,7 +376,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
                 response_mode: currentSnapshot.pending.responseMode,
               }
             : null;
-          const templates = (currentResult.availableActions ?? []).map(({ category, description, message }) => ({
+          const templates = currentAvailableActions.map(({ category, description, message }) => ({
             category,
             description,
             action_type: message.actionType,
@@ -419,6 +432,45 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         attempts.push(attempt);
         if (!chosen) continue;
 
+        // Revalidate after model latency. The opponent/timers can advance a pending
+        // window while the model is thinking. Only submit if both the safe
+        // observation and public legal-action set are still identical.
+        decisionSnapshot = await snapshotFor(client);
+        currentSnapshot = decisionSnapshot.view;
+        currentAvailableActions = decisionSnapshot.availableActions;
+        if (!snapshotNeedsDecision(currentSnapshot)) {
+          staleWindow = true;
+          break;
+        }
+        const refreshedObservation = buildPlayerObservation(currentSnapshot, config.game.mode);
+        const refreshedBuild = buildLegalActionsWithCoverage(currentAvailableActions, currentSnapshot);
+        const refreshedActions = refreshedBuild.actions;
+        const sameObservation = JSON.stringify(refreshedObservation) === JSON.stringify(latestObservation);
+        const sameActions = JSON.stringify(toPublicLegalActions(refreshedActions))
+          === JSON.stringify(toPublicLegalActions(latestActions));
+        if (!sameObservation || !sameActions) {
+          errors.push('模型思考期间决策窗口已变化；已刷新 observation 和 legal_actions，请重新选择');
+          chosen = null;
+          latestObservation = refreshedObservation;
+          latestActions = refreshedActions;
+          latestCoverage = refreshedBuild.coverage;
+          continue;
+        }
+        const chosenMessage = JSON.stringify(chosen.message);
+        const refreshedChosen = refreshedActions.find((action) => JSON.stringify(action.message) === chosenMessage);
+        if (!refreshedChosen) {
+          errors.push('模型选择的动作在提交前已不再合法；已刷新 legal_actions，请重新选择');
+          chosen = null;
+          latestObservation = refreshedObservation;
+          latestActions = refreshedActions;
+          latestCoverage = refreshedBuild.coverage;
+          continue;
+        }
+        chosen = refreshedChosen;
+        latestObservation = refreshedObservation;
+        latestActions = refreshedActions;
+        latestCoverage = refreshedBuild.coverage;
+
         lastSubmittedAction = chosen;
         const submitted = await client.callTool('play', {
           action: chosen.message,
@@ -430,13 +482,15 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           engineRejectionReasons.push(currentResult.lastActionRejectionReason ?? 'unknown');
           errors.push(`游戏引擎拒绝了本次动作(${currentResult.lastActionRejectionReason ?? 'unknown'})；请基于新的 observation 和 legal_actions 重选`);
           chosen = null;
-          currentSnapshot = await snapshotFor(client);
+          decisionSnapshot = await snapshotFor(client);
+          currentSnapshot = decisionSnapshot.view;
+          currentAvailableActions = decisionSnapshot.availableActions;
           if (!snapshotNeedsDecision(currentSnapshot)) {
             staleWindow = true;
             break;
           }
           latestObservation = buildPlayerObservation(currentSnapshot, config.game.mode);
-          actionBuild = buildLegalActionsWithCoverage(currentResult.availableActions ?? [], currentSnapshot);
+          actionBuild = buildLegalActionsWithCoverage(currentAvailableActions, currentSnapshot);
           latestActions = actionBuild.actions;
           latestCoverage = actionBuild.coverage;
           continue;
@@ -497,9 +551,11 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           engineRejectionReasons.push(currentResult.lastActionRejectionReason ?? 'unknown');
           alreadyTried.add(fallback.action_id);
           chosen = null;
-          currentSnapshot = await snapshotFor(client);
+          decisionSnapshot = await snapshotFor(client);
+          currentSnapshot = decisionSnapshot.view;
+          currentAvailableActions = decisionSnapshot.availableActions;
           latestObservation = buildPlayerObservation(currentSnapshot, config.game.mode);
-          actionBuild = buildLegalActionsWithCoverage(currentResult.availableActions ?? [], currentSnapshot);
+          actionBuild = buildLegalActionsWithCoverage(currentAvailableActions, currentSnapshot);
           latestActions = actionBuild.actions;
           latestCoverage = actionBuild.coverage;
         }
