@@ -161,8 +161,10 @@ function publishableHistoryAction(action: LegalAction): boolean {
   return action.category !== 'selectChar';
 }
 
+type LegalActionCoverageTotals = Omit<LegalActionCoverage, 'coverage_ratio'>;
+
 function sumCoverage(events: Array<Record<string, unknown>>): LegalActionCoverage {
-  const totals = events.reduce(
+  const totals = events.reduce<LegalActionCoverageTotals>(
     (acc, event) => {
       const coverage = event['legal_action_coverage'] as LegalActionCoverage | undefined;
       if (!coverage) return acc;
@@ -172,7 +174,12 @@ function sumCoverage(events: Array<Record<string, unknown>>): LegalActionCoverag
       acc.concrete_actions += coverage.concrete_actions;
       return acc;
     },
-    { total_templates: 0, supported_templates: 0, unsupported_templates: 0, concrete_actions: 0 },
+    {
+      total_templates: 0,
+      supported_templates: 0,
+      unsupported_templates: 0,
+      concrete_actions: 0,
+    },
   );
   return {
     ...totals,
