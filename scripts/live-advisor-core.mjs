@@ -20,6 +20,58 @@ export function normalizeCardName(value) {
   return CARD_ALIASES.get(normalized) ?? normalized;
 }
 
+export function normalizeDecisionText(value) {
+  return String(value ?? '').replace(/[\s，。,.、：:；;！!？?]/g, '');
+}
+
+function stableHand(context) {
+  return (context.hand ?? []).map((card) => normalizeCardName(card.name));
+}
+
+function stablePlayers(context) {
+  return Object.entries(context.players ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([seat, player]) => [
+      seat,
+      Number(player.role_confidence ?? 0) >= 0.7 ? player.role ?? null : null,
+      player.health ?? null,
+      player.relation ?? '未知',
+    ]);
+}
+
+function stableCandidates(context) {
+  return (context.candidates ?? []).map((candidate) => candidate.id).sort();
+}
+
+function stableHistory(context) {
+  return (context.public_history ?? [])
+    .map((entry) => normalizeDecisionText(entry))
+    .filter(Boolean)
+    .slice(-8);
+}
+
+export function buildDecisionSignature(context) {
+  return JSON.stringify({
+    kind: context.kind,
+    prompt: normalizeDecisionText(context.prompt),
+    hand: stableHand(context),
+    players: stablePlayers(context),
+    candidates: stableCandidates(context),
+    public_history: stableHistory(context),
+  });
+}
+
+export function decisionChangeReason(previous, current) {
+  if (!previous) return 'initial';
+  if (previous.kind !== current.kind) return 'kind_changed';
+  if (normalizeDecisionText(previous.prompt) !== normalizeDecisionText(current.prompt)) return 'prompt_changed';
+  if (JSON.stringify(stableHand(previous)) !== JSON.stringify(stableHand(current))) return 'hand_changed';
+  if (JSON.stringify(stablePlayers(previous)) !== JSON.stringify(stablePlayers(current))) return 'player_changed';
+  if (JSON.stringify(stableCandidates(previous)) !== JSON.stringify(stableCandidates(current))) return 'candidates_changed';
+  if (JSON.stringify(stableHistory(previous)) !== JSON.stringify(stableHistory(current))) return 'history_changed';
+  return 'decision_changed';
+}
+
 function relation(selfRole, otherRole) {
   if (!selfRole || !otherRole) return '未知';
   if (selfRole === '内奸') return '待判断';

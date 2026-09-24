@@ -82,3 +82,71 @@ test('gives an immediate conditional rescue cue when the dying role is not visib
   assert.equal(advisor.snapshot().status, 'ready');
   assert.match(advisor.snapshot().advice, /先确认濒死者身份/);
 });
+
+test('does not cancel a model request for one transient waiting frame', () => {
+  let time = 1_000_200;
+  const pending = [];
+  const advisor = new LiveAdvisor({
+    now: () => time,
+    advise: (_context, { signal }) => new Promise((resolve) => pending.push({ resolve, signal })),
+  });
+  advisor.ingest(event(1));
+  advisor.ingest(event(2, '请等待其他玩家'));
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].signal.aborted, false);
+  assert.equal(advisor.stats.canceled, 0);
+  assert.equal(advisor.snapshot().status, 'waiting');
+
+  time += 200;
+  advisor.ingest(event(3));
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].signal.aborted, false);
+  assert.equal(advisor.snapshot().status, 'thinking');
+});
+
+test('cancels after visual instability persists beyond the grace window', () => {
+  let time = 1_000_200;
+  const pending = [];
+  const advisor = new LiveAdvisor({
+    now: () => time,
+    advise: (_context, { signal }) => new Promise((resolve) => pending.push({ resolve, signal })),
+  });
+  advisor.ingest(event(1));
+  advisor.ingest(event(2, '请等待其他玩家'));
+  time += 650;
+  advisor.ingest(event(2, '请等待其他玩家'));
+  assert.equal(pending[0].signal.aborted, true);
+  assert.equal(advisor.stats.canceled, 1);
+  assert.equal(advisor.stats.cancel_reasons.unstable_state, 1);
+  assert.equal(advisor.stats.last_cancel_reason, 'unstable_state');
+});
+
+test('player-state changes invalidate an in-flight recommendation', () => {
+  const pending = [];
+  const advisor = new LiveAdvisor({
+    now: () => 1_000_200,
+    advise: (_context, { signal }) => new Promise((resolve) => pending.push({ resolve, signal })),
+  });
+  const first = event(1);
+  const second = event(2);
+  second.state.data.players.left.health = 2;
+  advisor.ingest(first);
+  advisor.ingest(second);
+  assert.equal(pending.length, 2);
+  assert.equal(pending[0].signal.aborted, true);
+  assert.equal(advisor.stats.cancel_reasons.player_changed, 1);
+});
+
+test('model timeout is tracked separately from state-driven cancellation', async () => {
+  const timeout = new Error('timed out');
+  timeout.name = 'TimeoutError';
+  const advisor = new LiveAdvisor({
+    now: () => 1_000_200,
+    advise: async () => { throw timeout; },
+  });
+  advisor.ingest(event(1));
+  await Promise.resolve();
+  assert.equal(advisor.stats.errors, 1);
+  assert.equal(advisor.stats.timeouts, 1);
+  assert.equal(advisor.stats.canceled, 0);
+});

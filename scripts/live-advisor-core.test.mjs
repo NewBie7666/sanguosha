@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { askLocalModel, buildContext, normalizeCardName, validateChoice } from './live-advisor-core.mjs';
+import {
+  askLocalModel,
+  buildContext,
+  buildDecisionSignature,
+  decisionChangeReason,
+  normalizeCardName,
+  validateChoice,
+} from './live-advisor-core.mjs';
 
 function event(prompt, hand = [
   { name: '閃', confidence: 0.98 },
@@ -112,4 +119,23 @@ test('limits a play suggestion to known cards when one card is unreadable', () =
   assert.equal(context.kind, 'play');
   assert.equal(context.unreadable_card_count, 1);
   assert.deepEqual(context.candidates.map((candidate) => candidate.id), ['consider-2-left', 'end']);
+});
+
+test('decision signature changes when visible player state changes', () => {
+  const firstEvent = event('出牌阶段，请选择1张卡牌', [{ name: '殺', confidence: 0.99 }]);
+  const secondEvent = structuredClone(firstEvent);
+  secondEvent.state.data.players.left.health = 1;
+  const first = buildContext(firstEvent);
+  const second = buildContext(secondEvent);
+  assert.notEqual(buildDecisionSignature(first), buildDecisionSignature(second));
+  assert.equal(decisionChangeReason(first, second), 'player_changed');
+});
+
+test('decision signature normalizes public log punctuation but reacts to new history', () => {
+  const first = buildContext(event('出牌阶段，请选择1张卡牌'), ['左侧反贼出杀。']);
+  const punctuationOnly = buildContext(event('出牌阶段，请选择1张卡牌'), ['左侧反贼出杀']);
+  const changed = buildContext(event('出牌阶段，请选择1张卡牌'), ['左侧反贼使用桃']);
+  assert.equal(buildDecisionSignature(first), buildDecisionSignature(punctuationOnly));
+  assert.notEqual(buildDecisionSignature(first), buildDecisionSignature(changed));
+  assert.equal(decisionChangeReason(first, changed), 'history_changed');
 });

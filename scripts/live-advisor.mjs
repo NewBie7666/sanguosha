@@ -1,12 +1,20 @@
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 
-import { askLocalModel, buildContext } from './live-advisor-core.mjs';
+import {
+  askLocalModel,
+  buildContext,
+  buildDecisionSignature,
+  decisionChangeReason,
+  normalizeDecisionText,
+} from './live-advisor-core.mjs';
 
 const VISION_URL = process.env.VISIONBOX_URL ?? 'http://127.0.0.1:8765';
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.LIVE_ADVISOR_PORT ?? 8767);
 const MAX_EVENT_AGE_MS = 4000;
+const UNSTABLE_GRACE_MS = 600;
+const UNSTABLE_GRACE_EVENTS = 3;
 
 export class LiveAdvisor {
   constructor({ fetchImpl = fetch, advise = askLocalModel, now = Date.now } = {}) {
@@ -16,64 +24,170 @@ export class LiveAdvisor {
     this.lastEvent = null;
     this.publicHistory = [];
     this.signature = null;
+    this.context = null;
     this.controller = null;
     this.requestId = 0;
     this.retryAt = 0;
-    this.stats = { started: 0, completed: 0, canceled: 0, errors: 0 };
+    this.unstableSince = null;
+    this.unstableCount = 0;
+    this.unstableContext = null;
+    this.heldAdvice = null;
+    this.stats = {
+      started: 0,
+      completed: 0,
+      canceled: 0,
+      errors: 0,
+      timeouts: 0,
+      cancel_reasons: {},
+      last_cancel_reason: null,
+    };
     this.result = { status: 'waiting', reason: '等待 VisionBox 对局画面' };
   }
 
-  _cancel() {
+  _cancel(reason = 'unspecified') {
     this.requestId += 1;
     if (this.controller) {
       this.stats.canceled += 1;
-      this.controller.abort();
+      this.stats.cancel_reasons[reason] = (this.stats.cancel_reasons[reason] ?? 0) + 1;
+      this.stats.last_cancel_reason = reason;
+      this.controller.abort(reason);
     }
     this.controller = null;
+    this.heldAdvice = null;
+  }
+
+  _resetUnstable() {
+    this.unstableSince = null;
+    this.unstableCount = 0;
+    this.unstableContext = null;
+  }
+
+  _finalizeUnstable(context = this.unstableContext, event = this.lastEvent) {
+    this._cancel('unstable_state');
+    this.signature = null;
+    this.context = null;
+    this._resetUnstable();
+    this.result = {
+      status: 'waiting',
+      reason: context?.reason ?? '等待稳定的视觉状态',
+      frame_id: event?.frame_id,
+    };
+  }
+
+  _expireUnstable() {
+    if (this.unstableSince === null) return;
+    if (this.now() - this.unstableSince >= UNSTABLE_GRACE_MS) {
+      this._finalizeUnstable();
+    }
+  }
+
+  _holdTransient(context, event) {
+    const hasActiveDecision = this.signature !== null
+      || this.controller !== null
+      || this.result.status === 'ready'
+      || this.heldAdvice !== null;
+    if (!hasActiveDecision) {
+      this.result = { status: 'waiting', reason: context.reason, frame_id: event.frame_id };
+      return;
+    }
+
+    if (this.unstableSince === null) {
+      this.unstableSince = this.now();
+      this.unstableCount = 0;
+      if (this.result.status === 'ready') this.heldAdvice = this.result;
+    }
+    this.unstableCount += 1;
+    this.unstableContext = context;
+    this.result = {
+      status: 'waiting',
+      reason: `视觉状态短暂不稳定：${context.reason}`,
+      frame_id: event.frame_id,
+      transient: true,
+    };
+
+    if (
+      this.unstableCount >= UNSTABLE_GRACE_EVENTS
+      || this.now() - this.unstableSince >= UNSTABLE_GRACE_MS
+    ) {
+      this._finalizeUnstable(context, event);
+    }
   }
 
   ingest(event) {
+    this._expireUnstable();
     if (!event) return;
     if (this.lastEvent && event.frame_id <= this.lastEvent.frame_id) {
       const restarted = event.frame_id < this.lastEvent.frame_id - 10
         && Date.parse(event.timestamp) > Date.parse(this.lastEvent.timestamp);
       if (!restarted) return;
-      this._cancel();
+      this._cancel('source_restart');
       this.lastEvent = null;
       this.publicHistory = [];
       this.signature = null;
+      this.context = null;
+      this._resetUnstable();
     }
+
     this.lastEvent = event;
     const log = String(event.state?.data?.texts_by_region?.public_log ?? '').trim();
-    if (log && log.length <= 160 && log !== this.publicHistory.at(-1)) {
+    const normalizedLog = normalizeDecisionText(log);
+    const previousLog = normalizeDecisionText(this.publicHistory.at(-1));
+    if (log && log.length <= 160 && normalizedLog && normalizedLog !== previousLog) {
       this.publicHistory.push(log);
       this.publicHistory = this.publicHistory.slice(-8);
     }
+
     if (event.event === 'error' || !event.state) {
-      this._cancel();
+      this._cancel('vision_error');
       this.signature = null;
+      this.context = null;
+      this._resetUnstable();
       this.result = { status: 'waiting', reason: event.message ?? '等待视觉识别恢复' };
       return;
     }
 
     const context = buildContext(event, this.publicHistory);
     if (context.kind === 'insufficient' || context.kind === 'waiting') {
-      this._cancel();
-      this.signature = null;
-      this.result = { status: 'waiting', reason: context.reason, frame_id: event.frame_id };
+      this._holdTransient(context, event);
       return;
     }
 
-    const signature = JSON.stringify({
-      kind: context.kind,
-      prompt: context.prompt.replace(/[\s，。,.、：:；;！!？?]/g, ''),
-      hand: context.hand.map((card) => card.name),
-    });
-    if (signature === this.signature && (this.result.status !== 'error' || this.now() < this.retryAt)) {
-      return;
+    const recoveredFromUnstable = this.unstableSince !== null;
+    const heldAdvice = this.heldAdvice;
+    this._resetUnstable();
+
+    const signature = buildDecisionSignature(context);
+    const sameDecision = signature === this.signature;
+    if (sameDecision) {
+      this.context = context;
+      if (this.result.status === 'error' && this.now() < this.retryAt) return;
+      if (heldAdvice && !this.controller) {
+        this.heldAdvice = null;
+        this.result = {
+          ...heldAdvice,
+          frame_id: event.frame_id,
+          observed_at: event.timestamp,
+        };
+        return;
+      }
+      if (this.controller) {
+        if (recoveredFromUnstable) {
+          this.result = {
+            status: 'thinking',
+            reason: '视觉状态已恢复，继续分析当前局面',
+            frame_id: event.frame_id,
+          };
+        }
+        return;
+      }
+      if (this.result.status === 'ready') return;
+    } else {
+      const reason = decisionChangeReason(this.context, context);
+      this._cancel(reason);
+      this.signature = signature;
+      this.context = context;
     }
-    this._cancel();
-    this.signature = signature;
+
     if (context.kind === 'rescue' && context.candidates[0]?.id === 'verify-dying-role') {
       this.result = {
         status: 'ready', kind: context.kind, frame_id: event.frame_id,
@@ -85,6 +199,7 @@ export class LiveAdvisor {
       };
       return;
     }
+
     this.result = { status: 'thinking', reason: '正在结合当前局势分析', frame_id: event.frame_id };
     const requestId = this.requestId;
     const controller = new AbortController();
@@ -98,15 +213,21 @@ export class LiveAdvisor {
       const advice = await this.advise(context, { signal: controller.signal });
       if (requestId === this.requestId) {
         this.stats.completed += 1;
-        this.result = advice;
+        if (this.unstableSince !== null) {
+          this.heldAdvice = advice;
+        } else {
+          this.result = advice;
+        }
       }
     } catch (error) {
       if (requestId !== this.requestId) return;
+      const timedOut = error?.name === 'TimeoutError';
       this.stats.errors += 1;
+      if (timedOut) this.stats.timeouts += 1;
       this.retryAt = this.now() + 5000;
       this.result = {
         status: 'error', frame_id: context.frame_id,
-        reason: error?.name === 'TimeoutError' ? '本机模型超过 6 秒，已取消这次建议' : String(error?.message ?? error),
+        reason: timedOut ? '本机模型超过 6 秒，已取消这次建议' : String(error?.message ?? error),
       };
     } finally {
       if (requestId === this.requestId) this.controller = null;
@@ -114,6 +235,7 @@ export class LiveAdvisor {
   }
 
   snapshot() {
+    this._expireUnstable();
     const ageMs = this.lastEvent ? this.now() - Date.parse(this.lastEvent.timestamp) : null;
     if (ageMs !== null && (ageMs > MAX_EVENT_AGE_MS || ageMs < -1000)) {
       return { status: 'stale', reason: '识别画面已过期，请核对游戏是否仍在当前操作', age_ms: ageMs };
@@ -141,10 +263,12 @@ function serve() {
     try {
       await advisor.poll();
     } catch (error) {
-      advisor._cancel();
+      advisor._cancel('visionbox_poll_error');
       advisor.lastEvent = null;
       advisor.publicHistory = [];
       advisor.signature = null;
+      advisor.context = null;
+      advisor._resetUnstable();
       advisor.result = { status: 'error', reason: `无法读取 VisionBox：${error.message}` };
     } finally {
       busy = false;
@@ -173,7 +297,7 @@ function serve() {
   server.listen(PORT, HOST, () => console.log(`Live advisor: http://${HOST}:${PORT}/advice`));
   const close = () => {
     clearInterval(timer);
-    advisor._cancel();
+    advisor._cancel('shutdown');
     server.close();
   };
   process.once('SIGINT', close);
