@@ -32,6 +32,21 @@ export interface PlayInput {
   lobbyAdvance?: () => void;
 }
 
+export interface PlayTelemetry {
+  /** sendAction 同步调用本身耗时；真实 HTTP/服务端处理主要计入 engineSettlementMs。 */
+  actionSubmitMs: number;
+  /** 从动作提交完成到 seq 推进/拒绝/结束，表示引擎确认本次动作所需时间。 */
+  engineSettlementMs: number;
+  /** 本次 play() 内观察到的连续 silent pending 等待段数量。 */
+  silentPendingWaitCount: number;
+  /** silent pending 等待累计时间。 */
+  silentPendingWaitMs: number;
+  /** 非 silent 状态下命中显式 waitTimeoutMs 的次数。 */
+  otherWaitTimeoutCount: number;
+  /** 非 silent 状态下命中显式 waitTimeoutMs 时，本次等待累计时间。 */
+  otherWaitTimeoutMs: number;
+}
+
 export interface PlayResult {
   /** 当前房间码（lobby 阶段供房主分享给人类加入；playing 阶段恒定） */
   roomId: string | null;
@@ -64,6 +79,8 @@ export interface PlayResult {
   lastActionResult: 'accepted' | 'rejected' | 'timeout' | 'not-applicable';
   /** lastActionResult=rejected 时的机器可读原因。 */
   lastActionRejectionReason: string | null;
+  /** 只做诊断，不参与策略或规则判断。 */
+  telemetry: PlayTelemetry;
 }
 
 // 默认无限等待：服务端自有 pending 超时（30~50s × timeoutSec）推进状态，
@@ -73,8 +90,36 @@ const TICK_MS = 20;
 const registeredSkillSets = new WeakMap<HeadlessGameClient, Set<string>>();
 
 export async function runPlay(hgc: HeadlessGameClient, input: PlayInput): Promise<PlayResult> {
+  const playStartedAt = performance.now();
   let lastActionResult: PlayResult['lastActionResult'] = 'not-applicable';
   let lastActionRejectionReason: string | null = null;
+  let actionSubmitMs = 0;
+  let engineSettlementMs = 0;
+  let settlementStartedAt: number | null = null;
+  let settlementRecorded = false;
+  let silentPendingWaitCount = 0;
+  let silentPendingWaitMs = 0;
+  let silentPendingStartedAt: number | null = null;
+  let otherWaitTimeoutCount = 0;
+  let otherWaitTimeoutMs = 0;
+
+  const updateSilentPending = (now = performance.now()): boolean => {
+    const silent = hgc.view?.pending?.responseMode === 'silent';
+    if (silent && silentPendingStartedAt === null) {
+      silentPendingStartedAt = now;
+      silentPendingWaitCount++;
+    } else if (!silent && silentPendingStartedAt !== null) {
+      silentPendingWaitMs += now - silentPendingStartedAt;
+      silentPendingStartedAt = null;
+    }
+    return silent;
+  };
+  const finishSilentPending = (now = performance.now()): void => {
+    if (silentPendingStartedAt !== null) {
+      silentPendingWaitMs += now - silentPendingStartedAt;
+      silentPendingStartedAt = null;
+    }
+  };
   // 提交 action 后,必须等服务端真正处理(seq 推进 / 被拒 / 游戏结束)再判定 needsAction。
   // sendAction 是 fire-and-forget 的 HTTP POST,首个同步 tick 看到的仍是 pre-action 旧视图
   // (此时 needsAction 仍为提交前的 true)→ 立即返回 accepted + 旧手牌,LLM 误判"未生效"并
@@ -83,7 +128,10 @@ export async function runPlay(hgc: HeadlessGameClient, input: PlayInput): Promis
   const seqBeforeAction = submittedAction ? hgc.lastSeq : -1;
   let actionProcessed = !submittedAction;
   if (submittedAction) {
+    const submitStartedAt = performance.now();
     hgc.sendAction(input.action!.message);
+    actionSubmitMs = performance.now() - submitStartedAt;
+    settlementStartedAt = performance.now();
     lastActionResult = 'accepted';
   }
   // 自动注册技能：选将后 view 有 character + skills 但 registry 可能未注册。
@@ -148,25 +196,50 @@ export async function runPlay(hgc: HeadlessGameClient, input: PlayInput): Promis
         newLog: hgc.drainNewEvents(),
         lastActionResult,
         lastActionRejectionReason,
+        telemetry: {
+          actionSubmitMs: Math.round(actionSubmitMs),
+          engineSettlementMs: Math.round(engineSettlementMs),
+          silentPendingWaitCount,
+          silentPendingWaitMs: Math.round(silentPendingWaitMs),
+          otherWaitTimeoutCount,
+          otherWaitTimeoutMs: Math.round(otherWaitTimeoutMs),
+        },
       };
     };
-    const settle = () => resolve(snapshot());
+    const settle = () => {
+      finishSilentPending();
+      resolve(snapshot());
+    };
+    const markActionProcessed = (now = performance.now()) => {
+      if (actionProcessed) return;
+      actionProcessed = true;
+      if (!settlementRecorded && settlementStartedAt !== null) {
+        engineSettlementMs += now - settlementStartedAt;
+        settlementRecorded = true;
+      }
+    };
     const tick = () => {
+      const now = performance.now();
+      const silentPending = updateSilentPending(now);
       // 服务端拒了本次 action：报告 rejected，继续等下一个 needsAction 点
       if (hgc.consumeActionRejected()) {
         lastActionResult = 'rejected';
         lastActionRejectionReason = hgc.lastActionRejectedReason ?? 'unknown';
-        actionProcessed = true; // 被拒 = 服务端已处理本次 action
+        markActionProcessed(now); // 被拒 = 服务端已处理本次 action
       }
       if (hgc.phase === 'ended' || hgc.gameOverWinner !== null) return settle();
       // 提交了 action 但尚未确认处理:等待 seq 推进(状态变化)后再判定 needsAction,
       // 避免用 pre-action 旧视图的 needsAction=true 立即返回(见函数头注释)。
       if (!actionProcessed) {
         if (hgc.lastSeq > seqBeforeAction) {
-          actionProcessed = true;
+          markActionProcessed(now);
         } else {
           if (Date.now() >= deadline) {
             if (lastActionResult === 'accepted') lastActionResult = 'timeout';
+            if (!silentPending) {
+              otherWaitTimeoutCount++;
+              otherWaitTimeoutMs += performance.now() - playStartedAt;
+            }
             return settle();
           }
           setTimeout(tick, TICK_MS);
@@ -185,6 +258,10 @@ export async function runPlay(hgc: HeadlessGameClient, input: PlayInput): Promis
       // 仅当调用方显式传 waitTimeoutMs 时生效，作为极端卡死的上限保护。
       if (Date.now() >= deadline) {
         if (lastActionResult === 'accepted') lastActionResult = 'timeout';
+        if (!silentPending) {
+          otherWaitTimeoutCount++;
+          otherWaitTimeoutMs += performance.now() - playStartedAt;
+        }
         return settle();
       }
       setTimeout(tick, TICK_MS);

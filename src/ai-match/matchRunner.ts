@@ -20,6 +20,15 @@ import type { AiViewSnapshot, AvailableAction } from '../client/headless/types';
 
 type Seat = 'a' | 'b';
 
+interface PlayTelemetry {
+  actionSubmitMs: number;
+  engineSettlementMs: number;
+  silentPendingWaitCount: number;
+  silentPendingWaitMs: number;
+  otherWaitTimeoutCount: number;
+  otherWaitTimeoutMs: number;
+}
+
 interface PlayResult {
   roomId: string | null;
   phase: 'lobby' | 'playing' | 'ended';
@@ -31,7 +40,27 @@ interface PlayResult {
   recommendedAction: AvailableAction | null;
   lastActionResult: 'accepted' | 'rejected' | 'timeout' | 'not-applicable';
   lastActionRejectionReason: string | null;
+  telemetry?: PlayTelemetry;
 }
+
+interface DecisionTiming {
+  wait_for_decision_ms: number;
+  snapshot_ms: number;
+  rule_context_ms: number;
+  model_request_ms: number;
+  action_submit_ms: number;
+  engine_settlement_ms: number;
+}
+
+interface WaitDiagnostics {
+  silent_pending_wait_count: number;
+  silent_pending_wait_ms: number;
+  other_wait_timeout_count: number;
+  other_wait_timeout_ms: number;
+}
+
+type TimingKey = keyof DecisionTiming;
+
 
 type AttemptErrorKind = 'model_request' | 'model_parse' | 'invalid_action_id';
 
@@ -209,6 +238,51 @@ function countAttemptErrors(events: Array<Record<string, unknown>>, kind: Attemp
   }, 0);
 }
 
+function emptyDecisionTiming(): DecisionTiming {
+  return {
+    wait_for_decision_ms: 0,
+    snapshot_ms: 0,
+    rule_context_ms: 0,
+    model_request_ms: 0,
+    action_submit_ms: 0,
+    engine_settlement_ms: 0,
+  };
+}
+
+function roundedTiming(timing: DecisionTiming): DecisionTiming {
+  return Object.fromEntries(
+    Object.entries(timing).map(([key, value]) => [key, Math.round(value)]),
+  ) as unknown as DecisionTiming;
+}
+
+function emptyWaitDiagnostics(): WaitDiagnostics {
+  return {
+    silent_pending_wait_count: 0,
+    silent_pending_wait_ms: 0,
+    other_wait_timeout_count: 0,
+    other_wait_timeout_ms: 0,
+  };
+}
+
+function addWaitDiagnostics(target: WaitDiagnostics, telemetry?: PlayTelemetry): void {
+  if (!telemetry) return;
+  target.silent_pending_wait_count += telemetry.silentPendingWaitCount;
+  target.silent_pending_wait_ms += telemetry.silentPendingWaitMs;
+  target.other_wait_timeout_count += telemetry.otherWaitTimeoutCount;
+  target.other_wait_timeout_ms += telemetry.otherWaitTimeoutMs;
+}
+
+function sumTiming(events: Array<Record<string, unknown>>, key: TimingKey): number {
+  return Math.round(events.reduce((sum, event) => {
+    const timing = event['timing_ms'] as Partial<DecisionTiming> | undefined;
+    return sum + Number(timing?.[key] ?? 0);
+  }, 0));
+}
+
+function averageTiming(events: Array<Record<string, unknown>>, key: TimingKey): number {
+  return events.length === 0 ? 0 : Math.round(sumTiming(events, key) / events.length);
+}
+
 function rejectionReasonCounts(events: Array<Record<string, unknown>>): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const event of events) {
@@ -224,6 +298,11 @@ function rejectionReasonCounts(events: Array<Record<string, unknown>>): Record<s
 
 function makeSummaryMarkdown(summary: Record<string, unknown>): string {
   const tokens = summary['tokens'] as { a?: number; b?: number } | undefined;
+  const perf = summary['performance_ms'] as {
+    total?: Partial<DecisionTiming>;
+    average_per_decision?: Partial<DecisionTiming>;
+  } | undefined;
+  const waits = summary['wait_diagnostics'] as Partial<WaitDiagnostics> | undefined;
   return [
     '# 对局战报',
     '',
@@ -243,6 +322,12 @@ function makeSummaryMarkdown(summary: Record<string, unknown>): string {
     `- stale window：${summary['stale_windows']}；引擎拒绝：${summary['engine_rejections']}；fallback：${summary['fallback_actions']}`,
     `- 可训练决策：${summary['training_eligible_steps']} / ${summary['decision_steps']}`,
     `- LegalAction 模板覆盖率：${((summary['legal_action_coverage'] as LegalActionCoverage | undefined)?.coverage_ratio ?? 0) * 100}%`,
+    '',
+    '## 性能诊断',
+    `- 累计耗时(ms)：wait=${perf?.total?.wait_for_decision_ms ?? 0}；snapshot=${perf?.total?.snapshot_ms ?? 0}；rules=${perf?.total?.rule_context_ms ?? 0}；model=${perf?.total?.model_request_ms ?? 0}；submit=${perf?.total?.action_submit_ms ?? 0}；settlement=${perf?.total?.engine_settlement_ms ?? 0}`,
+    `- 每决策平均(ms)：wait=${perf?.average_per_decision?.wait_for_decision_ms ?? 0}；snapshot=${perf?.average_per_decision?.snapshot_ms ?? 0}；rules=${perf?.average_per_decision?.rule_context_ms ?? 0}；model=${perf?.average_per_decision?.model_request_ms ?? 0}；submit=${perf?.average_per_decision?.action_submit_ms ?? 0}；settlement=${perf?.average_per_decision?.engine_settlement_ms ?? 0}`,
+    `- silent pending：${waits?.silent_pending_wait_count ?? 0} 次 / ${waits?.silent_pending_wait_ms ?? 0} ms`,
+    `- 其他显式等待超时：${waits?.other_wait_timeout_count ?? 0} 次 / ${waits?.other_wait_timeout_ms ?? 0} ms`,
     ...(typeof summary['error'] === 'string' ? ['', `错误：${summary['error']}`] : []),
     '',
   ].join('\n');
@@ -281,6 +366,13 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
   let winner: string | null = null;
   let completionStatus: 'completed' | 'incomplete' = 'incomplete';
   let failure: string | undefined;
+  let schedulerWaitWallMs = 0;
+  const pendingDecisionWaitMs: Record<Seat, number> = { a: 0, b: 0 };
+  const pendingWaitDiagnostics: Record<Seat, WaitDiagnostics> = {
+    a: emptyWaitDiagnostics(),
+    b: emptyWaitDiagnostics(),
+  };
+  const totalWaitDiagnostics = emptyWaitDiagnostics();
 
   const writeEvent = async (event: Record<string, unknown>) => {
     events.push(event);
@@ -309,14 +401,27 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
     await mcp.b.callTool('joinRoom', { roomId });
     dependencies.onProgress?.(`两个独立 Agent 已进入房间 ${roomId}`);
 
-    const pendingA = mcp.a.callTool('play', {}).then(asPlayResult).then((result) => ({ seat: 'a' as const, result }));
-    const pendingB = mcp.b.callTool('play', {}).then(asPlayResult).then((result) => ({ seat: 'b' as const, result }));
-    const inFlight: Record<Seat, Promise<{ seat: Seat; result: PlayResult }> | null> = { a: pendingA, b: pendingB };
+    type ScheduledPlay = { seat: Seat; result: PlayResult; source: 'wait' | 'carried' };
+    const queueWait = (seat: Seat): Promise<ScheduledPlay> =>
+      mcp[seat]!.callTool('play', {}).then(asPlayResult).then((result) => ({ seat, result, source: 'wait' as const }));
+    const carryResult = (seat: Seat, result: PlayResult): Promise<ScheduledPlay> =>
+      Promise.resolve({ seat, result, source: 'carried' as const });
+    const pendingA = queueWait('a');
+    const pendingB = queueWait('b');
+    const inFlight: Record<Seat, Promise<ScheduledPlay> | null> = { a: pendingA, b: pendingB };
 
     while (events.length < config.run.max_decisions) {
-      const active = Object.values(inFlight).filter((promise): promise is Promise<{ seat: Seat; result: PlayResult }> => !!promise);
+      const active = Object.values(inFlight).filter((promise): promise is Promise<ScheduledPlay> => !!promise);
       if (active.length === 0) throw new Error('both MCP seats stopped waiting without a game result');
+      const schedulerWaitStartedAt = performance.now();
       const arrived = await Promise.race(active);
+      const schedulerWaitMs = performance.now() - schedulerWaitStartedAt;
+      schedulerWaitWallMs += schedulerWaitMs;
+      pendingDecisionWaitMs[arrived.seat] += schedulerWaitMs;
+      if (arrived.source === 'wait') {
+        addWaitDiagnostics(pendingWaitDiagnostics[arrived.seat], arrived.result.telemetry);
+        addWaitDiagnostics(totalWaitDiagnostics, arrived.result.telemetry);
+      }
       inFlight[arrived.seat] = null;
       const initialResult = arrived.result;
       if (initialResult.gameOver) {
@@ -332,20 +437,31 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         break;
       }
       if (!initialResult.needsAction) {
-        inFlight[arrived.seat] = mcp[arrived.seat]!.callTool('play', {}).then(asPlayResult).then((result) => ({ seat: arrived.seat, result }));
+        inFlight[arrived.seat] = queueWait(arrived.seat);
         continue;
       }
 
       const client = mcp[arrived.seat]!;
+      const timing = emptyDecisionTiming();
+      timing.wait_for_decision_ms = pendingDecisionWaitMs[arrived.seat];
+      const decisionWaitDiagnostics = { ...pendingWaitDiagnostics[arrived.seat] };
+      const timedSnapshot = async (): Promise<DecisionSnapshot> => {
+        const started = performance.now();
+        try {
+          return await snapshotFor(client);
+        } finally {
+          timing.snapshot_ms += performance.now() - started;
+        }
+      };
       let currentResult = initialResult;
-      let decisionSnapshot = await snapshotFor(client);
+      let decisionSnapshot = await timedSnapshot();
       let currentSnapshot = decisionSnapshot.view;
       let currentAvailableActions = decisionSnapshot.availableActions;
       // A second MCP seat can advance the room between this play() response and
       // getSnapshot(). Never send a stale prompt to the model or submit an action
       // against a pending window now owned by the opponent.
       if (!snapshotNeedsDecision(currentSnapshot)) {
-        inFlight[arrived.seat] = client.callTool('play', {}).then(asPlayResult).then((result) => ({ seat: arrived.seat, result }));
+        inFlight[arrived.seat] = queueWait(arrived.seat);
         continue;
       }
       let latestObservation = buildPlayerObservation(currentSnapshot, config.game.mode);
@@ -385,7 +501,9 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           errors.push(`没有可安全具体化的合法动作；窗口=${JSON.stringify(window)}；模板=${JSON.stringify(templates)}`);
           break;
         }
+        const ruleStartedAt = performance.now();
         const relevantRules = await buildRelevantRules(client, latestObservation, latestActions, ruleCache);
+        timing.rule_context_ms += performance.now() - ruleStartedAt;
         const providerRequest: ProviderRequest = {
           seat: arrived.seat,
           observation: latestObservation,
@@ -398,6 +516,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         let attempt: LoggedAttempt = {
           request: { model: providers[arrived.seat].model, input: providerRequest },
         };
+        const modelStartedAt = performance.now();
         try {
           const response = await providers[arrived.seat].chooseAction(providerRequest);
           attempt.request = response.request_body;
@@ -428,6 +547,8 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           const message = error instanceof Error ? error.message : String(error);
           errors.push(message);
           attempt = { error: message, errorKind: 'model_request' };
+        } finally {
+          timing.model_request_ms += performance.now() - modelStartedAt;
         }
         attempts.push(attempt);
         if (!chosen) continue;
@@ -435,7 +556,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         // Revalidate after model latency. The opponent/timers can advance a pending
         // window while the model is thinking. Only submit if both the safe
         // observation and public legal-action set are still identical.
-        decisionSnapshot = await snapshotFor(client);
+        decisionSnapshot = await timedSnapshot();
         currentSnapshot = decisionSnapshot.view;
         currentAvailableActions = decisionSnapshot.availableActions;
         if (!snapshotNeedsDecision(currentSnapshot)) {
@@ -472,17 +593,27 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         latestCoverage = refreshedBuild.coverage;
 
         lastSubmittedAction = chosen;
+        const actionCallStartedAt = performance.now();
         const submitted = await client.callTool('play', {
           action: chosen.message,
           returnAfterAction: true,
         });
+        const actionCallMs = performance.now() - actionCallStartedAt;
         currentResult = asPlayResult(submitted);
+        const engineSettlementMs = currentResult.telemetry?.engineSettlementMs ?? 0;
+        timing.engine_settlement_ms += engineSettlementMs;
+        timing.action_submit_ms += Math.max(
+          currentResult.telemetry?.actionSubmitMs ?? 0,
+          actionCallMs - engineSettlementMs,
+        );
+        addWaitDiagnostics(decisionWaitDiagnostics, currentResult.telemetry);
+        addWaitDiagnostics(totalWaitDiagnostics, currentResult.telemetry);
         if (currentResult.lastActionResult === 'rejected') {
           engineRejections++;
           engineRejectionReasons.push(currentResult.lastActionRejectionReason ?? 'unknown');
           errors.push(`游戏引擎拒绝了本次动作(${currentResult.lastActionRejectionReason ?? 'unknown'})；请基于新的 observation 和 legal_actions 重选`);
           chosen = null;
-          decisionSnapshot = await snapshotFor(client);
+          decisionSnapshot = await timedSnapshot();
           currentSnapshot = decisionSnapshot.view;
           currentAvailableActions = decisionSnapshot.availableActions;
           if (!snapshotNeedsDecision(currentSnapshot)) {
@@ -524,12 +655,16 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
           action_result: 'stale_window',
           game_result_after_action: null,
           latency_ms: latencyOf(attempts),
+          timing_ms: roundedTiming(timing),
+          wait_diagnostics: decisionWaitDiagnostics,
           tokens: totalTokens,
           model_errors: attempts.flatMap((attempt) => attempt.error ? [attempt.error] : []),
           model_error_kinds: attempts.flatMap((attempt) => attempt.errorKind ? [attempt.errorKind] : []),
           scheduler_errors: ['提交前决策窗口已切换；丢弃过期动作并重新等待'],
         });
-        inFlight[arrived.seat] = client.callTool('play', {}).then(asPlayResult).then((result) => ({ seat: arrived.seat, result }));
+        pendingDecisionWaitMs[arrived.seat] = 0;
+        pendingWaitDiagnostics[arrived.seat] = emptyWaitDiagnostics();
+        inFlight[arrived.seat] = queueWait(arrived.seat);
         continue;
       }
 
@@ -541,17 +676,27 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         for (const fallback of fallbacks) {
           chosen = fallback;
           modelActionValid = false;
+          const actionCallStartedAt = performance.now();
           const submitted = await client.callTool('play', {
             action: fallback.message,
             returnAfterAction: true,
           });
+          const actionCallMs = performance.now() - actionCallStartedAt;
           currentResult = asPlayResult(submitted);
+          const engineSettlementMs = currentResult.telemetry?.engineSettlementMs ?? 0;
+          timing.engine_settlement_ms += engineSettlementMs;
+          timing.action_submit_ms += Math.max(
+            currentResult.telemetry?.actionSubmitMs ?? 0,
+            actionCallMs - engineSettlementMs,
+          );
+          addWaitDiagnostics(decisionWaitDiagnostics, currentResult.telemetry);
+          addWaitDiagnostics(totalWaitDiagnostics, currentResult.telemetry);
           if (currentResult.lastActionResult !== 'rejected') break;
           engineRejections++;
           engineRejectionReasons.push(currentResult.lastActionRejectionReason ?? 'unknown');
           alreadyTried.add(fallback.action_id);
           chosen = null;
-          decisionSnapshot = await snapshotFor(client);
+          decisionSnapshot = await timedSnapshot();
           currentSnapshot = decisionSnapshot.view;
           currentAvailableActions = decisionSnapshot.availableActions;
           latestObservation = buildPlayerObservation(currentSnapshot, config.game.mode);
@@ -587,11 +732,15 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         action_result: currentResult.lastActionResult,
         game_result_after_action: currentResult.gameOver,
         latency_ms: latencyOf(attempts),
+        timing_ms: roundedTiming(timing),
+        wait_diagnostics: decisionWaitDiagnostics,
         tokens: totalTokens,
         model_errors: attempts.flatMap((attempt) => attempt.error ? [attempt.error] : []),
         model_error_kinds: attempts.flatMap((attempt) => attempt.errorKind ? [attempt.errorKind] : []),
       };
       await writeEvent(event);
+      pendingDecisionWaitMs[arrived.seat] = 0;
+      pendingWaitDiagnostics[arrived.seat] = emptyWaitDiagnostics();
       privateHistory[arrived.seat].push({ phase: latestObservation.phase, action: chosen.description });
       if (currentResult.lastActionResult === 'accepted' && publishableHistoryAction(chosen)) {
         publicHistory.push({
@@ -609,7 +758,7 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         completionStatus = 'completed';
         break;
       }
-      inFlight[arrived.seat] = Promise.resolve({ seat: arrived.seat, result: currentResult });
+      inFlight[arrived.seat] = carryResult(arrived.seat, currentResult);
     }
 
     if (completionStatus !== 'completed') {
@@ -644,6 +793,22 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
   const modelRequestErrors = countAttemptErrors(events, 'model_request');
   const staleWindows = events.filter((event) => event['stale_window'] === true).length;
   const engineRejectionReasons = rejectionReasonCounts(events);
+  const performanceTotal: DecisionTiming = {
+    wait_for_decision_ms: Math.round(schedulerWaitWallMs),
+    snapshot_ms: sumTiming(events, 'snapshot_ms'),
+    rule_context_ms: sumTiming(events, 'rule_context_ms'),
+    model_request_ms: sumTiming(events, 'model_request_ms'),
+    action_submit_ms: sumTiming(events, 'action_submit_ms'),
+    engine_settlement_ms: sumTiming(events, 'engine_settlement_ms'),
+  };
+  const performanceAverage: DecisionTiming = {
+    wait_for_decision_ms: averageTiming(events, 'wait_for_decision_ms'),
+    snapshot_ms: averageTiming(events, 'snapshot_ms'),
+    rule_context_ms: averageTiming(events, 'rule_context_ms'),
+    model_request_ms: averageTiming(events, 'model_request_ms'),
+    action_submit_ms: averageTiming(events, 'action_submit_ms'),
+    engine_settlement_ms: averageTiming(events, 'engine_settlement_ms'),
+  };
   const summary: Record<string, unknown> = {
     status: completionStatus,
     engine_id: 'wmzy/sanguosha',
@@ -677,6 +842,16 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
     training_eligible_steps: trainingEligibleSteps,
     training_excluded_steps: events.length - trainingEligibleSteps,
     legal_action_coverage: coverage,
+    performance_ms: {
+      total: performanceTotal,
+      average_per_decision: performanceAverage,
+    },
+    wait_diagnostics: {
+      silent_pending_wait_count: totalWaitDiagnostics.silent_pending_wait_count,
+      silent_pending_wait_ms: Math.round(totalWaitDiagnostics.silent_pending_wait_ms),
+      other_wait_timeout_count: totalWaitDiagnostics.other_wait_timeout_count,
+      other_wait_timeout_ms: Math.round(totalWaitDiagnostics.other_wait_timeout_ms),
+    },
     key_actions: events.slice(-10).map((event) => ({ player: event['player'], action: (event['parsed_action'] as { description?: string })?.description })),
     ...(failure ? { error: failure } : {}),
   };

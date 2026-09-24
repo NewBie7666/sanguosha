@@ -130,6 +130,46 @@ describe('match runner 完整闭环', () => {
       expect(events.every((event) => event['legal_action_coverage'])).toBe(true);
       expect(events.every((event) => Array.isArray(event['engine_rejection_reasons']))).toBe(true);
       expect(events.every((event) => Array.isArray(event['model_error_kinds']))).toBe(true);
+      expect(events.every((event) => {
+        const timing = event['timing_ms'] as Record<string, unknown> | undefined;
+        return timing
+          && typeof timing['wait_for_decision_ms'] === 'number'
+          && typeof timing['snapshot_ms'] === 'number'
+          && typeof timing['rule_context_ms'] === 'number'
+          && typeof timing['model_request_ms'] === 'number'
+          && typeof timing['action_submit_ms'] === 'number'
+          && typeof timing['engine_settlement_ms'] === 'number';
+      })).toBe(true);
+      expect(events.every((event) => {
+        const waits = event['wait_diagnostics'] as Record<string, unknown> | undefined;
+        return waits
+          && typeof waits['silent_pending_wait_count'] === 'number'
+          && typeof waits['silent_pending_wait_ms'] === 'number'
+          && typeof waits['other_wait_timeout_count'] === 'number'
+          && typeof waits['other_wait_timeout_ms'] === 'number';
+      })).toBe(true);
+      expect(summary['performance_ms']).toEqual(expect.objectContaining({
+        total: expect.objectContaining({
+          wait_for_decision_ms: expect.any(Number),
+          snapshot_ms: expect.any(Number),
+          rule_context_ms: expect.any(Number),
+          model_request_ms: expect.any(Number),
+          action_submit_ms: expect.any(Number),
+          engine_settlement_ms: expect.any(Number),
+        }),
+        average_per_decision: expect.any(Object),
+      }));
+      expect(summary['wait_diagnostics']).toEqual(expect.objectContaining({
+        silent_pending_wait_count: expect.any(Number),
+        silent_pending_wait_ms: expect.any(Number),
+        other_wait_timeout_count: expect.any(Number),
+        other_wait_timeout_ms: expect.any(Number),
+      }));
+      const summaryJson = await readFile(path.join(runDirectory, 'summary.json'), 'utf8');
+      const summaryMd = await readFile(path.join(runDirectory, 'summary.md'), 'utf8');
+      expect(summaryJson).toContain('"performance_ms"');
+      expect(summaryMd).toContain('## 性能诊断');
+      expect(summaryMd).toContain('silent pending');
       expect((await readdir(runDirectory)).sort()).toEqual(['config.json', 'game.jsonl', 'summary.json', 'summary.md']);
     } finally {
       await Promise.all([closeServer(endpointA.server), closeServer(endpointB.server)]);

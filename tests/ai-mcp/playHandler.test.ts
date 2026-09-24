@@ -42,6 +42,14 @@ describe('runPlay', () => {
     // 身份派生：hostId === playerId → host
     expect(res.isHost).toBe(true);
     expect(res.joinedAs).toBe('host');
+    expect(res.telemetry).toEqual(expect.objectContaining({
+      actionSubmitMs: expect.any(Number),
+      engineSettlementMs: expect.any(Number),
+      silentPendingWaitCount: expect.any(Number),
+      silentPendingWaitMs: expect.any(Number),
+      otherWaitTimeoutCount: expect.any(Number),
+      otherWaitTimeoutMs: expect.any(Number),
+    }));
   });
 
   it('游戏结束时立即返回', async () => {
@@ -74,6 +82,8 @@ describe('runPlay', () => {
     // 守门:必须等到 seq 推进后才返回,不能在 0ms 用 pre-action 旧视图立即返回
     expect(Date.now() - start).toBeGreaterThanOrEqual(4);
     expect(res.lastActionResult).toBe('accepted');
+    expect(res.telemetry.actionSubmitMs).toBeGreaterThanOrEqual(0);
+    expect(res.telemetry.engineSettlementMs).toBeGreaterThanOrEqual(4);
   });
 
   it('外部多座位 scheduler 可在服务器处理 action 后立即返回', async () => {
@@ -119,11 +129,40 @@ describe('runPlay', () => {
     expect(res.lastActionResult).toBe('timeout');
   });
 
-  it('未轮到自己且超时后返回 needsAction=false', async () => {
+  it('未轮到自己且超时后返回 needsAction=false，并计入普通等待超时', async () => {
     const fake = makeFake({ needsAction: () => false });
     const res = await runPlay(fake, { waitTimeoutMs: 80 });
     expect(res.needsAction).toBe(false);
     expect(res.stateDiff).toBeNull();
+    expect(res.telemetry.otherWaitTimeoutCount).toBe(1);
+    expect(res.telemetry.otherWaitTimeoutMs).toBeGreaterThanOrEqual(50);
+    expect(res.telemetry.silentPendingWaitCount).toBe(0);
+  });
+
+  it('silent pending 等待单独计数，不混入普通等待超时', async () => {
+    const silentView = {
+      viewer: 0,
+      currentPlayerIndex: 1,
+      phase: '判定',
+      turn: { round: 1 },
+      players: [],
+      pending: {
+        target: 1,
+        isBlocking: true,
+        responseMode: 'silent',
+        prompt: { type: 'useCard', title: 'silent' },
+        atom: { type: '测试' },
+      },
+      zones: { deckCount: 0, discardPileCount: 0 },
+      log: [],
+      cardMap: {},
+    } as never;
+    const fake = makeFake({ needsAction: () => false, view: silentView });
+    const res = await runPlay(fake, { waitTimeoutMs: 80 });
+    expect(res.telemetry.silentPendingWaitCount).toBe(1);
+    expect(res.telemetry.silentPendingWaitMs).toBeGreaterThanOrEqual(50);
+    expect(res.telemetry.otherWaitTimeoutCount).toBe(0);
+    expect(res.telemetry.otherWaitTimeoutMs).toBe(0);
   });
 
   it('action 被服务端拒后报告 rejected 和机器可读原因', async () => {
