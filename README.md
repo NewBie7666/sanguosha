@@ -95,3 +95,16 @@ Plugin 包 `sanguosha-agent-plugin` 自包含玩家向 skill + sanguosha MCP ser
 ### 本仓库开发
 
 本仓库自身开发用源码直跑（`pnpm mcp:serve`，连 `ws://localhost:3930/ws`），配置见仓库根 `.mcp.json`。发布 plugin npm 包用 `pnpm build:plugin` 打包 skill + MCP 为单文件。
+
+
+## Live Sanguosha advisor development
+
+The experimental live advisor is kept under `scripts/live-advisor*.mjs`.
+
+Run its focused regression suite with:
+
+```bash
+pnpm test:live-advisor
+```
+
+The suite covers decision fingerprinting, stale-answer protection, transient vision instability, cancellation telemetry, and model timeout handling.
