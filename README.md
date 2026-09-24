@@ -110,7 +110,7 @@ pnpm test:live-advisor
 The suite covers decision fingerprinting, stale-answer protection, transient vision instability, cancellation telemetry, and model timeout handling.
 
 The live skill panel reads `self_general` and `visible_skills` from VisionBox. The version-specific
-catalog in `scripts/live-skill-catalog.mjs` currently verifies Liu Chen and Zhang Song against the
-official mobile game character pages. It can show their skill timing even when buttons are hidden;
+catalog in `scripts/live-skill-catalog.mjs` currently covers Liu Chen, Zhang Song, and standard Wolong Zhuge
+using the official mobile character pages and official skill rules. It can show skill timing even when buttons are hidden;
 unknown skills remain unfilled until their mobile rules are verified. The `/health` endpoint also
 reports whether the configured local model is available and the advisor's Git revision.

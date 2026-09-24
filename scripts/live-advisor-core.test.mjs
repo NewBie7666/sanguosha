@@ -193,3 +193,20 @@ test('recognizing Zhang Song provides both skills without waiting for buttons', 
   current.state.data.self_general.confidence = 0.5;
   assert.deepEqual(buildSkillHints(current.state.data), []);
 });
+
+test('Wolong skill rules require the standard general to avoid same-name variants', () => {
+  const current = event('你可以将1张黑色手牌当【无懈可击】使用');
+  current.state.data.visible_skills = [
+    { name: '看破', confidence: 0.99 },
+    { name: '火计', confidence: 0.99 },
+    { name: '八阵', confidence: 0.99 },
+  ];
+  assert.ok(buildSkillHints(current.state.data).every((hint) => !hint.known));
+  current.state.data.self_general = { name: '卧龙诸葛', confidence: 0.9 };
+  const hints = buildSkillHints(current.state.data);
+  assert.ok(hints.every((hint) => hint.known));
+  assert.equal(hints.find((hint) => hint.name === '看破').availability, '当前可留意');
+  assert.equal(buildContext(current).skill_rules.length, 3);
+  current.state.data.self_general.name = '界卧龙诸葛';
+  assert.ok(buildSkillHints(current.state.data).every((hint) => !hint.known));
+});

@@ -29,6 +29,30 @@ const SKILLS = {
     tactic: '优先考虑有把握击杀的己方角色；自己血量低时，先衡量失去体力的风险。',
     source_url: 'https://www.sanguosha.cn/index.php/pc/hero-detail-179.html',
   },
+  八阵: {
+    general: '卧龙诸葛',
+    requires_general: true,
+    timing: '锁定技；没有装备防具时，视为装备着【八卦阵】。',
+    effect: '受到【杀】要求出【闪】时，按【八卦阵】的判定效果处理。',
+    tactic: '没有更合适的防具时，可利用八阵留出手牌；装备真实防具后要重新权衡防御。',
+    source_url: 'https://www.sanguosha.com/hero/37',
+  },
+  火计: {
+    general: '卧龙诸葛',
+    requires_general: true,
+    timing: '出牌阶段，可将一张红色手牌当【火攻】使用。',
+    effect: '把红色手牌转为【火攻】，目标与后续伤害仍按【火攻】规则结算。',
+    tactic: '优先考虑有手牌的脆弱敌人；先检查是否还能支付火攻的后续弃牌，别轻易消耗保命牌。',
+    source_url: 'https://www.sanguosha.com/hero/37',
+  },
+  看破: {
+    general: '卧龙诸葛',
+    requires_general: true,
+    timing: '需要使用【无懈可击】时，可将一张黑色手牌当【无懈可击】使用。',
+    effect: '黑色手牌可用于响应能够被【无懈可击】抵消的锦囊效果。',
+    tactic: '把黑牌留给会改变局势的关键锦囊，优先保护己方关键目标。',
+    source_url: 'https://www.sanguosha.com/hero/37',
+  },
 };
 
 export function buildSkillHints(data = {}) {
@@ -50,13 +74,15 @@ export function buildSkillHints(data = {}) {
     return true;
   }).map((skill) => {
     const rule = SKILLS[skill.name];
-    if (!rule) return {
+    if (!rule || (rule.requires_general && general !== rule.general)) return {
       name: skill.name,
       confidence: Number(skill.confidence),
       observed_on_screen: skill.observed_on_screen,
       known: false,
       availability: '规则待核对',
-      note: '尚未收录该移动版技能；请以游戏内技能说明为准。',
+      note: rule
+        ? '武将版本尚未可靠识别，暂不套用同名技能规则；请以游戏内说明为准。'
+        : '尚未收录该移动版技能；请以游戏内技能说明为准。',
     };
     let availability = '发动条件待核对';
     let note = '还需以游戏内可用按钮及技能状态核对。';
@@ -88,6 +114,15 @@ export function buildSkillHints(data = {}) {
       note = Number(data.players?.self?.health ?? 0) === 1
         ? '你目前仅1血；若受赠者本阶段没有击杀，你会失去1体力。'
         : '发动前核对受赠者能否在该阶段击杀，以及自己的血量。';
+    } else if (skill.name === '八阵') {
+      availability = '被动条件待核对';
+      note = '当前未可靠识别防具装备区；装备防具时不再按八阵的虚拟防具处理。';
+    } else if (skill.name === '火计') {
+      availability = /火计|火攻/.test(prompt) ? '当前可留意' : '留意出牌阶段';
+      note = '尚未识别手牌颜色及火攻后续弃牌条件，发动前请核对。';
+    } else if (skill.name === '看破') {
+      availability = /看破|无懈可击/.test(prompt) ? '当前可留意' : '留意锦囊响应时机';
+      note = '需要黑色手牌；当前手牌识别不含花色，发动前请核对。';
     }
     return {
       name: skill.name,
