@@ -13,6 +13,7 @@ const VISION_URL = process.env.VISIONBOX_URL ?? 'http://127.0.0.1:8765';
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.LIVE_ADVISOR_PORT ?? 8767);
 const MAX_EVENT_AGE_MS = 4000;
+const MAX_CAPTURE_AGE_MS = 4000;
 const UNSTABLE_GRACE_MS = 600;
 const UNSTABLE_GRACE_EVENTS = 3;
 
@@ -22,6 +23,7 @@ export class LiveAdvisor {
     this.advise = advise;
     this.now = now;
     this.lastEvent = null;
+    this.captureMetrics = null;
     this.publicHistory = [];
     this.signature = null;
     this.context = null;
@@ -237,19 +239,37 @@ export class LiveAdvisor {
   snapshot() {
     this._expireUnstable();
     const ageMs = this.lastEvent ? this.now() - Date.parse(this.lastEvent.timestamp) : null;
-    if (ageMs !== null && (ageMs > MAX_EVENT_AGE_MS || ageMs < -1000)) {
-      return { status: 'stale', reason: '识别画面已过期，请核对游戏是否仍在当前操作', age_ms: ageMs };
+    const captureAgeMs = this.captureMetrics?.last_capture_at
+      ? this.now() - Date.parse(this.captureMetrics.last_capture_at)
+      : null;
+    const captureFresh = this.captureMetrics?.running === true
+      && !this.captureMetrics.capture_error
+      && captureAgeMs !== null
+      && captureAgeMs >= -1000
+      && captureAgeMs <= MAX_CAPTURE_AGE_MS;
+    const eventFresh = ageMs !== null && ageMs >= -1000 && ageMs <= MAX_EVENT_AGE_MS;
+    if (this.lastEvent && !(this.captureMetrics ? captureFresh : eventFresh)) {
+      return {
+        status: 'stale', reason: '识别画面已过期，请核对游戏是否仍在当前操作',
+        age_ms: ageMs, capture_age_ms: captureAgeMs,
+      };
     }
-    return { ...this.result, age_ms: ageMs };
+    return { ...this.result, age_ms: ageMs, capture_age_ms: captureAgeMs };
   }
 
   async poll() {
-    const response = await this.fetchImpl(`${VISION_URL}/events?limit=1`, {
-      signal: AbortSignal.timeout(1500),
-      cache: 'no-store',
-    });
-    if (!response.ok) throw new Error(`VisionBox 返回 ${response.status}`);
-    const payload = await response.json();
+    const [metricsResponse, eventsResponse] = await Promise.all([
+      this.fetchImpl(`${VISION_URL}/metrics`, {
+        signal: AbortSignal.timeout(1500), cache: 'no-store',
+      }),
+      this.fetchImpl(`${VISION_URL}/events?limit=1`, {
+        signal: AbortSignal.timeout(1500), cache: 'no-store',
+      }),
+    ]);
+    if (!metricsResponse.ok) throw new Error(`VisionBox 指标返回 ${metricsResponse.status}`);
+    if (!eventsResponse.ok) throw new Error(`VisionBox 事件返回 ${eventsResponse.status}`);
+    const [metrics, payload] = await Promise.all([metricsResponse.json(), eventsResponse.json()]);
+    this.captureMetrics = metrics;
     this.ingest(payload.events?.at(-1));
   }
 }
@@ -265,6 +285,7 @@ function serve() {
     } catch (error) {
       advisor._cancel('visionbox_poll_error');
       advisor.lastEvent = null;
+      advisor.captureMetrics = null;
       advisor.publicHistory = [];
       advisor.signature = null;
       advisor.context = null;

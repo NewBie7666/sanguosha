@@ -59,6 +59,50 @@ test('hides a suggestion after the source event becomes stale', async () => {
   assert.equal(advisor.snapshot().advice, undefined);
 });
 
+test('keeps a suggestion while VisionBox captures an unchanged decision', async () => {
+  let time = 1_000_100;
+  const unchangedEvent = event(1);
+  const advisor = new LiveAdvisor({
+    now: () => time,
+    fetchImpl: async (url) => ({
+      ok: true,
+      json: async () => url.endsWith('/metrics')
+        ? { running: true, capture_error: null, last_capture_at: new Date(time).toISOString() }
+        : { events: [unchangedEvent] },
+    }),
+    advise: async () => ({ status: 'ready', advice: '出杀' }),
+  });
+  await advisor.poll();
+  await Promise.resolve();
+  time += 5_000;
+  await advisor.poll();
+  assert.equal(advisor.snapshot().status, 'ready');
+  assert.equal(advisor.snapshot().advice, '出杀');
+  assert.equal(advisor.snapshot().age_ms, 5_000);
+  assert.equal(advisor.snapshot().capture_age_ms, 0);
+});
+
+test('hides a suggestion when VisionBox capture stops or its frame is old', async () => {
+  let time = 1_000_100;
+  const advisor = new LiveAdvisor({
+    now: () => time,
+    advise: async () => ({ status: 'ready', advice: '出杀' }),
+  });
+  advisor.ingest(event(1));
+  await Promise.resolve();
+  advisor.captureMetrics = {
+    running: true, capture_error: null, last_capture_at: new Date(time).toISOString(),
+  };
+  time += 5_000;
+  assert.equal(advisor.snapshot().status, 'stale');
+  advisor.captureMetrics.last_capture_at = new Date(time).toISOString();
+  advisor.captureMetrics.capture_error = 'window not found';
+  assert.equal(advisor.snapshot().status, 'stale');
+  advisor.captureMetrics.capture_error = null;
+  advisor.captureMetrics.running = false;
+  assert.equal(advisor.snapshot().status, 'stale');
+});
+
 test('keeps one model request when OCR only changes prompt punctuation', () => {
   let calls = 0;
   const advisor = new LiveAdvisor({
