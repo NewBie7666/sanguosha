@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
-import { pathToFileURL } from 'node:url';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   askLocalModel,
@@ -8,6 +9,7 @@ import {
   decisionChangeReason,
   normalizeDecisionText,
 } from './live-advisor-core.mjs';
+import { buildSkillHints } from './live-skill-catalog.mjs';
 
 const VISION_URL = process.env.VISIONBOX_URL ?? 'http://127.0.0.1:8765';
 const HOST = '127.0.0.1';
@@ -16,6 +18,22 @@ const MAX_EVENT_AGE_MS = 4000;
 const MAX_CAPTURE_AGE_MS = 4000;
 const UNSTABLE_GRACE_MS = 600;
 const UNSTABLE_GRACE_EVENTS = 3;
+const MODEL_ID = 'qwen/qwen3-14b';
+const MODEL_LIST_URL = process.env.LIVE_ADVISOR_MODEL_LIST_URL ?? 'http://127.0.0.1:1234/v1/models';
+
+export async function probeLocalModel(fetchImpl = fetch) {
+  try {
+    const response = await fetchImpl(MODEL_LIST_URL, { signal: AbortSignal.timeout(1500) });
+    if (!response.ok) return { connected: false, reason: `本机模型接口返回 ${response.status}` };
+    const payload = await response.json();
+    if (!payload.data?.some((item) => item.id === MODEL_ID)) {
+      return { connected: false, reason: `未找到已加载的 ${MODEL_ID}` };
+    }
+    return { connected: true, reason: `${MODEL_ID} 已就绪` };
+  } catch {
+    return { connected: false, reason: '无法连接本机模型接口' };
+  }
+}
 
 export class LiveAdvisor {
   constructor({ fetchImpl = fetch, advise = askLocalModel, now = Date.now } = {}) {
@@ -254,7 +272,12 @@ export class LiveAdvisor {
         age_ms: ageMs, capture_age_ms: captureAgeMs,
       };
     }
-    return { ...this.result, age_ms: ageMs, capture_age_ms: captureAgeMs };
+    return {
+      ...this.result,
+      skill_hints: buildSkillHints(this.lastEvent?.state?.data),
+      age_ms: ageMs,
+      capture_age_ms: captureAgeMs,
+    };
   }
 
   async poll() {
@@ -276,6 +299,25 @@ export class LiveAdvisor {
 
 function serve() {
   const advisor = new LiveAdvisor();
+  const revision = (() => {
+    try {
+      return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+        cwd: fileURLToPath(new URL('../', import.meta.url)), encoding: 'utf8', timeout: 1000,
+      }).trim();
+    } catch {
+      return '未知';
+    }
+  })();
+  let modelStatus = { connected: false, reason: '检查中' };
+  let probingModel = false;
+  const probe = async () => {
+    if (probingModel) return;
+    probingModel = true;
+    try { modelStatus = await probeLocalModel(); }
+    finally { probingModel = false; }
+  };
+  const modelTimer = setInterval(probe, 3000);
+  void probe();
   let busy = false;
   const poll = async () => {
     if (busy) return;
@@ -312,12 +354,17 @@ function serve() {
     }
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.writeHead(200).end(JSON.stringify(request.url === '/health'
-      ? { ok: true, source: VISION_URL, latest_frame_id: advisor.lastEvent?.frame_id ?? null, stats: advisor.stats }
+      ? {
+        ok: true, source: VISION_URL, revision,
+        model_connected: modelStatus.connected, model_reason: modelStatus.reason,
+        latest_frame_id: advisor.lastEvent?.frame_id ?? null, stats: advisor.stats,
+      }
       : advisor.snapshot()));
   });
   server.listen(PORT, HOST, () => console.log(`Live advisor: http://${HOST}:${PORT}/advice`));
   const close = () => {
     clearInterval(timer);
+    clearInterval(modelTimer);
     advisor._cancel('shutdown');
     server.close();
   };

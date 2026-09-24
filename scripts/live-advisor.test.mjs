@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { LiveAdvisor } from './live-advisor.mjs';
+import { LiveAdvisor, probeLocalModel } from './live-advisor.mjs';
 
 function event(frameId, prompt = '出牌阶段，请选择1张卡牌', hand = '杀') {
   return {
@@ -57,6 +57,19 @@ test('hides a suggestion after the source event becomes stale', async () => {
   time += 5_000;
   assert.equal(advisor.snapshot().status, 'stale');
   assert.equal(advisor.snapshot().advice, undefined);
+});
+
+test('shows skill timing while waiting but hides it with a stale capture', () => {
+  let time = 1_000_100;
+  const advisor = new LiveAdvisor({ now: () => time, advise: async () => ({ status: 'ready' }) });
+  const visible = event(1, '请等待其他玩家');
+  visible.state.data.visible_skills = [{ name: '战绝', confidence: 0.99 }];
+  advisor.ingest(visible);
+  assert.equal(advisor.snapshot().status, 'waiting');
+  assert.equal(advisor.snapshot().skill_hints[0].name, '战绝');
+  time += 5_000;
+  assert.equal(advisor.snapshot().status, 'stale');
+  assert.equal(advisor.snapshot().skill_hints, undefined);
 });
 
 test('keeps a suggestion while VisionBox captures an unchanged decision', async () => {
@@ -193,4 +206,17 @@ test('model timeout is tracked separately from state-driven cancellation', async
   assert.equal(advisor.stats.errors, 1);
   assert.equal(advisor.stats.timeouts, 1);
   assert.equal(advisor.stats.canceled, 0);
+});
+
+test('model indicator requires the configured model to appear in the local model list', async () => {
+  const available = await probeLocalModel(async () => new Response(JSON.stringify({
+    data: [{ id: 'qwen/qwen3-14b' }],
+  }), { status: 200 }));
+  assert.equal(available.connected, true);
+  const missing = await probeLocalModel(async () => new Response(JSON.stringify({
+    data: [{ id: 'other-model' }],
+  }), { status: 200 }));
+  assert.equal(missing.connected, false);
+  const offline = await probeLocalModel(async () => { throw new Error('offline'); });
+  assert.equal(offline.connected, false);
 });

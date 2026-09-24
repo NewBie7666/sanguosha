@@ -1,4 +1,5 @@
 import { CARD_DESCRIPTIONS } from '../src/engine/data/card-defs/description.ts';
+import { buildSkillHints } from './live-skill-catalog.mjs';
 
 const TRADITIONAL = new Map(Object.entries({
   殺: '杀', 閃: '闪', 無: '无', 擊: '击', 鐵: '铁', 連: '连', 環: '环',
@@ -43,6 +44,16 @@ function stableCandidates(context) {
   return (context.candidates ?? []).map((candidate) => candidate.id).sort();
 }
 
+function stableSkills(context) {
+  return {
+    self_general: context.self_general ?? null,
+    names: [...new Set([
+      ...(context.visible_skills ?? []).map((skill) => skill.name),
+      ...(context.skill_rules ?? []).map((skill) => skill.name),
+    ])].sort(),
+  };
+}
+
 function stableHistory(context) {
   return (context.public_history ?? [])
     .map((entry) => normalizeDecisionText(entry))
@@ -57,6 +68,7 @@ export function buildDecisionSignature(context) {
     hand: stableHand(context),
     players: stablePlayers(context),
     candidates: stableCandidates(context),
+    visible_skills: stableSkills(context),
     public_history: stableHistory(context),
   });
 }
@@ -68,6 +80,7 @@ export function decisionChangeReason(previous, current) {
   if (JSON.stringify(stableHand(previous)) !== JSON.stringify(stableHand(current))) return 'hand_changed';
   if (JSON.stringify(stablePlayers(previous)) !== JSON.stringify(stablePlayers(current))) return 'player_changed';
   if (JSON.stringify(stableCandidates(previous)) !== JSON.stringify(stableCandidates(current))) return 'candidates_changed';
+  if (JSON.stringify(stableSkills(previous)) !== JSON.stringify(stableSkills(current))) return 'skills_changed';
   if (JSON.stringify(stableHistory(previous)) !== JSON.stringify(stableHistory(current))) return 'history_changed';
   return 'decision_changed';
 }
@@ -107,6 +120,9 @@ export function buildContext(event, publicHistory = []) {
   const rules = Object.fromEntries(
     knownHand.map((card) => [card.name, CARD_DESCRIPTIONS[card.name] ?? '牌效未收录，需以游戏提示为准']),
   );
+  const skillHints = buildSkillHints(data);
+  const selfGeneral = Number(data.self_general?.confidence ?? 0) >= 0.85
+    ? data.self_general.name : null;
   const common = {
     frame_id: event.frame_id,
     observed_at: event.timestamp,
@@ -115,6 +131,19 @@ export function buildContext(event, publicHistory = []) {
     unreadable_card_count: hand.length - knownHand.length,
     players,
     rules,
+    self_general: selfGeneral,
+    visible_skills: skillHints.filter((skill) => skill.observed_on_screen)
+      .map(({ name, confidence }) => ({ name, confidence })),
+    skill_rules: skillHints.filter((skill) => skill.known).map((skill) => ({
+      name: skill.name,
+      general: skill.general,
+      timing: skill.timing,
+      effect: skill.effect,
+      tactic: skill.tactic,
+      availability: skill.availability,
+      observed_on_screen: skill.observed_on_screen,
+      note: skill.note,
+    })),
     public_history: publicHistory.slice(-8),
   };
   if (!selfRole) {
@@ -251,6 +280,8 @@ export function buildMessages(context) {
       '救援提示若未识别濒死者身份，不得臆测其敌我；应在理由中说明按身份决定。',
       '若有未识别手牌，只能就已识别的手牌给出暂定建议，理由中须说明有牌未识别。',
       '屏幕识别可能有误，未知信息不得臆造；角色技能若无文字说明，只可标注待核对。',
+      '技能资料仅覆盖已核实的移动版技能；不得把“可考虑”当作确定可发动，必须核对游戏按钮与未识别条件。',
+      '按武将识别推得的技能可能未显示按钮；不可断定此刻可以发动。',
       '只输出JSON：{"choice_id":"候选ID","reason":"具体局势理由，不超过50字"}。/no_think',
     ].join('') },
     { role: 'user', content: JSON.stringify(context) + '/no_think' },

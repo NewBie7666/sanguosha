@@ -9,6 +9,7 @@ import {
   normalizeCardName,
   validateChoice,
 } from './live-advisor-core.mjs';
+import { buildSkillHints } from './live-skill-catalog.mjs';
 
 function event(prompt, hand = [
   { name: '閃', confidence: 0.98 },
@@ -138,4 +139,57 @@ test('decision signature normalizes public log punctuation but reacts to new his
   assert.equal(buildDecisionSignature(first), buildDecisionSignature(punctuationOnly));
   assert.notEqual(buildDecisionSignature(first), buildDecisionSignature(changed));
   assert.equal(decisionChangeReason(first, changed), 'history_changed');
+});
+
+test('verified mobile skills provide timing and enter the model context', () => {
+  const current = event('出牌阶段，请选择1张卡牌', [{ name: '杀', confidence: 0.99 }]);
+  current.state.data.visible_skills = [
+    { name: '勤王', confidence: 0.995 },
+    { name: '战绝', confidence: 0.998 },
+  ];
+  const hints = buildSkillHints(current.state.data);
+  assert.equal(hints.length, 2);
+  assert.equal(hints[0].general, '刘谌');
+  assert.match(hints[0].timing, /主公技/);
+  assert.match(hints[1].timing, /全部手牌/);
+  assert.equal(hints[1].availability, '出牌阶段可考虑');
+  const context = buildContext(current);
+  assert.deepEqual(context.visible_skills.map((skill) => skill.name), ['勤王', '战绝']);
+  assert.equal(context.skill_rules.length, 2);
+  assert.match(context.skill_rules[1].tactic, /手牌/);
+});
+
+test('skill hints do not assert availability when identity or conditions are missing', () => {
+  const current = event('请使用1张杀');
+  current.state.data.visible_skills = [{ name: '勤王', confidence: 0.99 }];
+  assert.equal(buildSkillHints(current.state.data)[0].availability, '当前可留意');
+  current.state.data.players.self.role = '反贼';
+  assert.equal(buildSkillHints(current.state.data)[0].availability, '当前身份不满足主公技');
+  current.state.data.players.self.role_confidence = 0.4;
+  assert.equal(buildSkillHints(current.state.data)[0].availability, '发动条件待核对');
+});
+
+test('uncollected skills are shown without invented rules and skill changes invalidate advice', () => {
+  const firstEvent = event('出牌阶段，请选择1张卡牌', [{ name: '杀', confidence: 0.99 }]);
+  const secondEvent = structuredClone(firstEvent);
+  secondEvent.state.data.visible_skills = [{ name: '新技能', confidence: 0.95 }];
+  const hint = buildSkillHints(secondEvent.state.data)[0];
+  assert.equal(hint.known, false);
+  assert.match(hint.note, /尚未收录/);
+  assert.equal(buildContext(secondEvent).skill_rules.length, 0);
+  assert.notEqual(buildDecisionSignature(buildContext(firstEvent)), buildDecisionSignature(buildContext(secondEvent)));
+  assert.equal(decisionChangeReason(buildContext(firstEvent), buildContext(secondEvent)), 'skills_changed');
+});
+
+test('recognizing Zhang Song provides both skills without waiting for buttons', () => {
+  const current = event('请等待其他玩家');
+  current.state.data.self_general = { name: '张松', confidence: 0.996 };
+  current.state.data.players.self.health = 1;
+  const hints = buildSkillHints(current.state.data);
+  assert.deepEqual(hints.map((hint) => hint.name), ['强识', '献图']);
+  assert.ok(hints.every((hint) => hint.observed_on_screen === false));
+  assert.match(hints[1].note, /仅1血/);
+  assert.equal(buildContext(current).skill_rules.length, 2);
+  current.state.data.self_general.confidence = 0.5;
+  assert.deepEqual(buildSkillHints(current.state.data), []);
 });
