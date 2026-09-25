@@ -13,6 +13,7 @@ function event(prompt, hand, {
   left = { role: '反贼', role_confidence: 0.99, health: 2, visible_text: '张辽' },
 } = {}) {
   return {
+    plugin: 'sanguosha',
     frame_id: frameId,
     timestamp: new Date(1_004_200).toISOString(),
     state: { data: {

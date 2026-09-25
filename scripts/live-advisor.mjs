@@ -21,6 +21,7 @@ const UNSTABLE_GRACE_MS = 600;
 const UNSTABLE_GRACE_EVENTS = 3;
 const MODEL_ID = 'qwen/qwen3-14b';
 const MODEL_LIST_URL = process.env.LIVE_ADVISOR_MODEL_LIST_URL ?? 'http://127.0.0.1:1234/v1/models';
+const SUPPORTED_PLUGIN = 'sanguosha';
 
 export async function probeLocalModel(fetchImpl = fetch) {
   try {
@@ -140,9 +141,27 @@ export class LiveAdvisor {
     }
   }
 
+  _ignoreForeignPlugin(event) {
+    this._cancel('plugin_changed');
+    this.lastEvent = null;
+    this.publicHistory = [];
+    this.signature = null;
+    this.context = null;
+    this._resetUnstable();
+    this.result = {
+      status: 'waiting',
+      reason: '当前流程不是三国杀，策略服务已暂停',
+      frame_id: event?.frame_id,
+    };
+  }
+
   ingest(event) {
     this._expireUnstable();
     if (!event) return;
+    if (event.plugin !== SUPPORTED_PLUGIN) {
+      this._ignoreForeignPlugin(event);
+      return;
+    }
     if (this.lastEvent && event.frame_id <= this.lastEvent.frame_id) {
       const restarted = event.frame_id < this.lastEvent.frame_id - 10
         && Date.parse(event.timestamp) > Date.parse(this.lastEvent.timestamp);

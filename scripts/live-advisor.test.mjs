@@ -5,6 +5,7 @@ import { LiveAdvisor, probeLocalModel } from './live-advisor.mjs';
 
 function event(frameId, prompt = '出牌阶段，请选择1张卡牌', hand = '杀') {
   return {
+    plugin: 'sanguosha',
     frame_id: frameId,
     timestamp: new Date(1_000_000 + frameId * 100).toISOString(),
     event: 'scene_changed',
@@ -25,6 +26,28 @@ test('skips the model when the visible decision is not actionable', () => {
   advisor.ingest(event(1, '请等待其他玩家'));
   assert.equal(advisor.snapshot().status, 'waiting');
   assert.equal(calls, 0);
+});
+
+test('ignores generic VisionBox flows and clears a running Sanguosha request', async () => {
+  const pending = [];
+  const advisor = new LiveAdvisor({
+    now: () => 1_000_200,
+    advise: (_context, { signal }) => new Promise((resolve) => pending.push({ resolve, signal })),
+  });
+  advisor.ingest(event(1));
+  assert.equal(pending.length, 1);
+
+  const generic = { ...event(2, '请等待其他玩家'), plugin: 'generic-text' };
+  advisor.ingest(generic);
+  assert.equal(pending[0].signal.aborted, true);
+  assert.equal(advisor.stats.cancel_reasons.plugin_changed, 1);
+  assert.equal(advisor.snapshot().status, 'waiting');
+  assert.match(advisor.snapshot().reason, /不是三国杀/);
+
+  pending[0].resolve({ status: 'ready', advice: '过期三国杀建议' });
+  await Promise.resolve();
+  assert.equal(advisor.snapshot().advice, undefined);
+  assert.equal(advisor.lastEvent, null);
 });
 
 test('ignores an older model answer after the visible hand changes', async () => {
