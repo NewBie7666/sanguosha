@@ -171,10 +171,14 @@ export function buildContext(event, publicHistory = []) {
     }
     kind = 'rescue';
     const dyingName = prompt.match(/^(.+?)(?:生命危急|濒死)/)?.[1]?.trim();
-    const dyingPlayer = dyingName && Object.values(players).find((player) =>
-      player.visible_text && (player.visible_text.includes(dyingName) || dyingName.includes(player.visible_text)),
-    );
-    if (!dyingPlayer || !['己方', '敌方', '自己'].includes(dyingPlayer.relation)) {
+    const dyingPlayer = /^(你|自己)/.test(prompt)
+      ? players.self
+      : dyingName && Object.values(players).find((player) =>
+        player.visible_text
+          && Number(player.role_confidence ?? 0) >= 0.7
+          && (player.visible_text.includes(dyingName) || dyingName.includes(player.visible_text)),
+      );
+    if (!dyingPlayer || !['己方', '自己'].includes(dyingPlayer.relation)) {
       return {
         ...common, kind,
         candidates: [{

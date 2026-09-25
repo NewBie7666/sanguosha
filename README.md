@@ -114,3 +114,11 @@ catalog in `scripts/live-skill-catalog.mjs` currently covers Liu Chen, Zhang Son
 using the official mobile character pages and official skill rules. It can show skill timing even when buttons are hidden;
 unknown skills remain unfilled until their mobile rules are verified. The `/health` endpoint also
 reports whether the configured local model is available and the advisor's Git revision.
+
+The live advisor also has a small visible-state fast policy. High-confidence discard, flash, and rescue prompts can
+receive a deterministic suggestion without waiting for the local model. Discard scoring only uses cards visible in the
+current OCR result and keeps 桃, 闪, and 无懈可击 ahead of ordinary cards; rescue is immediate only when the dying
+player is reliably identified as self or an ally; flash is immediate only at one health. Unreadable cards, unknown
+card names, uncertain roles, or close keep-value scores abstain and continue through the model or verification path.
+Fast results include `policy_ms`; model results include the fast-policy timing and reason for observability. The
+policy is an original implementation and does not copy code from GPL game AI projects.

@@ -9,6 +9,7 @@ import {
   decisionChangeReason,
   normalizeDecisionText,
 } from './live-advisor-core.mjs';
+import { evaluateFastPolicy } from './live-advisor-fast-policy.mjs';
 import { buildSkillHints } from './live-skill-catalog.mjs';
 
 const VISION_URL = process.env.VISIONBOX_URL ?? 'http://127.0.0.1:8765';
@@ -36,9 +37,15 @@ export async function probeLocalModel(fetchImpl = fetch) {
 }
 
 export class LiveAdvisor {
-  constructor({ fetchImpl = fetch, advise = askLocalModel, now = Date.now } = {}) {
+  constructor({
+    fetchImpl = fetch,
+    advise = askLocalModel,
+    fastPolicy = evaluateFastPolicy,
+    now = Date.now,
+  } = {}) {
     this.fetchImpl = fetchImpl;
     this.advise = advise;
+    this.fastPolicy = fastPolicy;
     this.now = now;
     this.lastEvent = null;
     this.captureMetrics = null;
@@ -208,6 +215,25 @@ export class LiveAdvisor {
       this.context = context;
     }
 
+    let fastDecision;
+    try {
+      fastDecision = this.fastPolicy(context);
+    } catch (error) {
+      fastDecision = {
+        status: 'abstain',
+        reason: `快速策略异常，转交局势分析：${error?.message ?? error}`,
+        policy_ms: 0,
+      };
+    }
+    if (fastDecision.status === 'ready') {
+      this.result = {
+        ...fastDecision,
+        frame_id: event.frame_id,
+        observed_at: event.timestamp,
+      };
+      return;
+    }
+
     if (context.kind === 'rescue' && context.candidates[0]?.id === 'verify-dying-role') {
       this.result = {
         status: 'ready', kind: context.kind, frame_id: event.frame_id,
@@ -216,27 +242,39 @@ export class LiveAdvisor {
         requires_validation: true,
         unreadable_card_count: context.unreadable_card_count,
         model_ms: 0,
+        fast_policy_ms: fastDecision.policy_ms,
       };
       return;
     }
 
-    this.result = { status: 'thinking', reason: '正在结合当前局势分析', frame_id: event.frame_id };
+    this.result = {
+      status: 'thinking',
+      reason: '正在结合当前局势分析',
+      frame_id: event.frame_id,
+      fast_policy_ms: fastDecision.policy_ms,
+      fast_policy_reason: fastDecision.reason,
+    };
     const requestId = this.requestId;
     const controller = new AbortController();
     this.controller = controller;
     this.stats.started += 1;
-    void this._run(context, requestId, controller);
+    void this._run(context, requestId, controller, fastDecision);
   }
 
-  async _run(context, requestId, controller) {
+  async _run(context, requestId, controller, fastDecision) {
     try {
       const advice = await this.advise(context, { signal: controller.signal });
       if (requestId === this.requestId) {
         this.stats.completed += 1;
+        const enrichedAdvice = {
+          ...advice,
+          fast_policy_ms: fastDecision?.policy_ms,
+          fast_policy_reason: fastDecision?.reason,
+        };
         if (this.unstableSince !== null) {
-          this.heldAdvice = advice;
+          this.heldAdvice = enrichedAdvice;
         } else {
-          this.result = advice;
+          this.result = enrichedAdvice;
         }
       }
     } catch (error) {
