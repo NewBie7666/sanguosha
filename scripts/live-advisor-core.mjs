@@ -126,6 +126,7 @@ export function buildContext(event, publicHistory = []) {
   const common = {
     frame_id: event.frame_id,
     observed_at: event.timestamp,
+    capture_at: event.meta?.capture_at ?? null,
     prompt,
     hand,
     unreadable_card_count: hand.length - knownHand.length,
@@ -146,10 +147,6 @@ export function buildContext(event, publicHistory = []) {
     })),
     public_history: publicHistory.slice(-8),
   };
-  if (!selfRole) {
-    return { ...common, kind: 'insufficient', reason: '尚未可靠识别自己的身份', candidates: [] };
-  }
-
   let kind;
   let candidates;
   if (/诈降/.test(prompt) && /失去.*体力/.test(prompt)) {
@@ -270,6 +267,9 @@ export function buildContext(event, publicHistory = []) {
     });
   } else {
     return { ...common, kind: 'waiting', reason: '当前没有已识别的可操作提示', candidates: [] };
+  }
+  if (!selfRole && !['discard', 'respond', 'rescue'].includes(kind)) {
+    return { ...common, kind: 'insufficient', reason: '尚未可靠识别自己的身份', candidates: [] };
   }
   return { ...common, kind, candidates };
 }

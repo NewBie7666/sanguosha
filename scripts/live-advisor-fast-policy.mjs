@@ -68,6 +68,7 @@ function discardScore(candidate) {
 
 function makeFastResult(context, candidate, reason, started) {
   const policyMs = scoreMs(started);
+  const capturedAt = Date.parse(context.capture_at ?? '');
   return {
     status: 'ready',
     source: 'fast_policy',
@@ -80,6 +81,8 @@ function makeFastResult(context, candidate, reason, started) {
     requires_validation: true,
     unreadable_card_count: context.unreadable_card_count,
     policy_ms: policyMs,
+    capture_to_advice_ms: Number.isFinite(capturedAt)
+      ? Math.max(0, Date.now() - capturedAt) : null,
   };
 }
 

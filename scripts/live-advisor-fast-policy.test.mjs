@@ -47,6 +47,18 @@ test('fast discard policy uses only high-confidence visible cards', () => {
   assert.ok(result.policy_ms < 100);
 });
 
+test('fast advice reports policy time separately from capture-to-advice time', () => {
+  const sample = event('弃牌阶段，选1张手牌', [
+    { name: '杀', confidence: 0.99 }, { name: '桃', confidence: 0.99 },
+  ]);
+  sample.meta = { capture_at: new Date(Date.now() - 250).toISOString() };
+  const result = evaluateFastPolicy(buildContext(sample));
+  assert.equal(result.status, 'ready');
+  assert.ok(result.policy_ms < 100);
+  assert.ok(result.capture_to_advice_ms >= 200);
+  assert.ok(result.capture_to_advice_ms < 2_000);
+});
+
 test('fast discard policy abstains for unreadable or unscored cards', () => {
   const lowConfidence = evaluateFastPolicy(context('弃牌阶段，选1张手牌', [
     { name: '杀', confidence: 0.79 },
@@ -74,6 +86,23 @@ test('fast flash policy only recommends at one health with a readable flash', ()
     { name: '闪', confidence: 0.97 },
   ], { selfHealth: 2 }));
   assert.equal(safeHealth.status, 'abstain');
+});
+
+test('own discard, flash and self rescue remain available when identity OCR is uncertain', () => {
+  const options = { selfRoleConfidence: 0.3 };
+  const discard = evaluateFastPolicy(context('弃牌阶段，选1张手牌', [
+    { name: '杀', confidence: 0.99 }, { name: '桃', confidence: 0.99 },
+  ], options));
+  assert.equal(discard.status, 'ready');
+  const flash = evaluateFastPolicy(context('请出闪', [
+    { name: '闪', confidence: 0.99 },
+  ], { ...options, selfHealth: 1 }));
+  assert.equal(flash.status, 'ready');
+  const rescue = evaluateFastPolicy(context('你生命危急，需要1个桃。', [
+    { name: '桃', confidence: 0.99 },
+  ], { ...options, selfHealth: 0 }));
+  assert.equal(rescue.status, 'ready');
+  assert.equal(context('出牌阶段', [{ name: '杀', confidence: 0.99 }], options).kind, 'insufficient');
 });
 
 test('fast rescue policy requires a reliable self or ally relation', () => {
