@@ -46,16 +46,19 @@ implementation (Laya, Valen-style choice heads, a heuristic baseline, or another
 }
 ```
 
-## Export self-play decisions
+## Self-play output
 
-After a match creates `game.jsonl`:
+`runMatch` now writes both `game.jsonl` and `policy-v1.jsonl` for every decision. The policy file
+contains the normalized model boundary and keeps excluded decisions with explicit reasons.
+
+For existing historical runs that only have `game.jsonl`, regenerate the policy file with:
 
 ```bash
 pnpm policy:export output/<run>/game.jsonl
 ```
 
-By default only trainable rows are written. Add `--include-unready` to retain excluded rows for
-review and diagnostics.
+The standalone exporter writes trainable rows by default. Add `--include-unready` to retain excluded
+rows for review and diagnostics.
 
 The Python video dataset implements the same field names and version. Cross-repository fixtures
 should be kept structurally identical before a policy model is trained.
