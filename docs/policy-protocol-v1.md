@@ -59,3 +59,5 @@ review and diagnostics.
 
 The Python video dataset implements the same field names and version. Cross-repository fixtures
 should be kept structurally identical before a policy model is trained.
+
+The protocol layer has no model dependency; Laya or another policy backend is intentionally a later adapter.
