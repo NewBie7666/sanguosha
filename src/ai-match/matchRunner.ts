@@ -4,6 +4,7 @@ import path from 'node:path';
 import { buildLegalActionsWithCoverage, chooseDeterministicFallback, parseActionId, resolveActionId, toPublicLegalActions } from './legalActions';
 import { McpProcess } from './mcpProcess';
 import { buildPlayerObservation } from './observation';
+import { buildEnginePolicySampleV1 } from './policyProtocol';
 import { getUsageTotals, OpenAICompatibleProvider } from './provider';
 import { redactConfig } from './config';
 import type {
@@ -348,7 +349,9 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
   await mkdir(runDir, { recursive: false });
   await writeFile(path.join(runDir, 'config.json'), `${json(redactConfig(config))}\n`, 'utf8');
   const gameLogPath = path.join(runDir, 'game.jsonl');
+  const policyLogPath = path.join(runDir, 'policy-v1.jsonl');
   await writeFile(gameLogPath, '', 'utf8');
+  await writeFile(policyLogPath, '', 'utf8');
 
   const providers: Record<Seat, ModelProvider> = {
     a: dependencies.providers?.a ?? new OpenAICompatibleProvider(config.players.a),
@@ -739,6 +742,20 @@ export async function runMatch(config: MatchConfig, dependencies: MatchDependenc
         model_error_kinds: attempts.flatMap((attempt) => attempt.errorKind ? [attempt.errorKind] : []),
       };
       await writeEvent(event);
+      const policySample = buildEnginePolicySampleV1({
+        sample_id: `${runId}-decision-${String(decisionStep).padStart(6, '0')}`,
+        observation: latestObservation,
+        legal_actions: toPublicLegalActions(latestActions),
+        chosen_action_id: chosen.action_id,
+        training_eligible: event['training_eligible'] === true,
+        public_history: publicHistory.slice(-24),
+        metadata: {
+          player: arrived.seat,
+          engine_action_result: currentResult.lastActionResult,
+          fallback: event['fallback'] === true,
+        },
+      });
+      await appendFile(policyLogPath, `${JSON.stringify(policySample)}\n`, 'utf8');
       pendingDecisionWaitMs[arrived.seat] = 0;
       pendingWaitDiagnostics[arrived.seat] = emptyWaitDiagnostics();
       privateHistory[arrived.seat].push({ phase: latestObservation.phase, action: chosen.description });
