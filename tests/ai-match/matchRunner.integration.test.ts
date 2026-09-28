@@ -112,7 +112,21 @@ describe('match runner 完整闭环', () => {
       expect(savedConfig).not.toContain('secret-b');
       const events = (await readFile(path.join(runDirectory, 'game.jsonl'), 'utf8'))
         .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+      const policyRows = (await readFile(path.join(runDirectory, 'policy-v1.jsonl'), 'utf8'))
+        .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
       expect(events).toHaveLength(Number(summary['decision_steps']));
+      expect(policyRows).toHaveLength(Number(summary['decision_steps']));
+      expect(policyRows.every((row) =>
+        row['schema'] === 'sanguosha-policy' && row['schema_version'] === '1.0'
+      )).toBe(true);
+      expect(policyRows.every((row) => {
+        if (row['training_ready'] !== true) return true;
+        const chosen = row['chosen_action_id'];
+        const candidates = row['legal_actions'] as Array<{ action_id?: string }> | undefined;
+        return typeof chosen === 'string'
+          && Array.isArray(candidates)
+          && candidates.some((candidate) => candidate.action_id === chosen);
+      })).toBe(true);
       expect(events.at(-1)?.['game_result_after_action']).toBeTruthy();
       expect(summary['legal_action_coverage']).toEqual(expect.objectContaining({
         total_templates: expect.any(Number),
@@ -170,7 +184,13 @@ describe('match runner 完整闭环', () => {
       expect(summaryJson).toContain('"performance_ms"');
       expect(summaryMd).toContain('## 性能诊断');
       expect(summaryMd).toContain('silent pending');
-      expect((await readdir(runDirectory)).sort()).toEqual(['config.json', 'game.jsonl', 'summary.json', 'summary.md']);
+      expect((await readdir(runDirectory)).sort()).toEqual([
+        'config.json',
+        'game.jsonl',
+        'policy-v1.jsonl',
+        'summary.json',
+        'summary.md',
+      ]);
     } finally {
       await Promise.all([closeServer(endpointA.server), closeServer(endpointB.server)]);
       await rm(outputDir, { recursive: true, force: true });
