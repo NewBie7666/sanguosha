@@ -109,6 +109,19 @@ pnpm test:live-advisor
 
 The suite covers decision fingerprinting, stale-answer protection, transient vision instability, cancellation telemetry, and model timeout handling.
 
+During the play phase, the model now returns a conditional turn plan (up to six candidate IDs)
+and the indices of cards to reserve. Every recognized card must appear in one of these groups.
+The validator rejects repeated use of one physical card, multiple Slash uses without reliable
+usage/equipment data, and steps after a draw whose outcome is unknown. The API exposes
+`turn_plan_text`, `reserve_text`, and `planning_note` for a workflow's display configuration.
+This is a model-proposed ordering with basic consistency checks, not a game-state search or a
+guarantee of optimal play. OCR does not yet provide a verified total hand count: check the
+recognized cards and their indices first, especially for crowded or selected-card layouts.
+Selecting a uniquely identified planned card can reuse its planned target without another model
+request; changes to the hand, player state, skills, or public history invalidate that plan.
+The explicit end-play button can trigger planning before a card is clicked. Unknown phases and
+unreadable cards remain uncertain; after drawing, the new hand must be observed and replanned.
+
 The live skill panel reads `self_general` and `visible_skills` from VisionBox. The version-specific
 catalog in `scripts/live-skill-catalog.mjs` currently covers Liu Chen, Zhang Song, and standard Wolong Zhuge
 using the official mobile character pages and official skill rules. It can show skill timing even when buttons are hidden;

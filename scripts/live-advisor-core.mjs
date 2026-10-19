@@ -1,5 +1,6 @@
 import { CARD_DESCRIPTIONS } from '../src/engine/data/card-defs/description.ts';
 import { buildSkillHints } from './live-skill-catalog.mjs';
+import { validateTurnPlan } from './live-advisor-turn-plan.mjs';
 
 const TRADITIONAL = new Map(Object.entries({
   殺: '杀', 閃: '闪', 無: '无', 擊: '击', 鐵: '铁', 連: '连', 環: '环',
@@ -73,6 +74,14 @@ export function buildDecisionSignature(context) {
   });
 }
 
+export function buildTurnPlanSignature(context) {
+  return JSON.stringify([
+    buildDecisionSignature({ ...context, kind: 'turn_plan', prompt: '', candidates: [] }),
+    context.unreadable_card_count,
+    (context.hand ?? []).map((card) => Number(card.confidence) >= 0.7),
+  ]);
+}
+
 export function decisionChangeReason(previous, current) {
   if (!previous) return 'initial';
   if (previous.kind !== current.kind) return 'kind_changed';
@@ -98,7 +107,15 @@ function relation(selfRole, otherRole) {
 export function buildContext(event, publicHistory = []) {
   const state = event?.state;
   const data = state?.data ?? {};
-  const prompt = String(data.decision?.prompt ?? '').trim();
+  const rawPrompt = String(data.decision?.prompt ?? '').trim();
+  const actions = String(data.decision?.actions ?? '').trim();
+  // An explicit end-play button is usable phase evidence before any card is
+  // selected. Do not infer a turn from a visible hand or an unrelated skill prompt.
+  const inferredPlay = (!rawPrompt || /请选择.*(?:手牌|卡牌)|请使用手牌/.test(rawPrompt))
+    && /结束出牌/.test(actions)
+    && !/选择|请|发动|判定|弃|需要|回应|响应/.test(actions)
+    && !/目标|角色|发动|判定|弃|需要|回应|响应|花色|代替|伤害/.test(rawPrompt);
+  const prompt = inferredPlay ? '出牌阶段' : rawPrompt;
   const rawPlayers = data.players ?? {};
   const selfRole = rawPlayers.self?.role_confidence >= 0.7 ? rawPlayers.self.role : null;
   const players = Object.fromEntries(
@@ -130,6 +147,7 @@ export function buildContext(event, publicHistory = []) {
     observed_at: event.timestamp,
     capture_at: event.meta?.capture_at ?? null,
     prompt,
+    prompt_source: inferredPlay ? 'end_play_button' : 'decision_prompt',
     hand,
     unreadable_card_count: hand.length - knownHand.length,
     players,
@@ -151,6 +169,10 @@ export function buildContext(event, publicHistory = []) {
   };
   let kind;
   let candidates;
+  let targetCard;
+  if (state?.scene === 'game_over') {
+    return { ...common, kind: 'waiting', reason: '对局已经结束', candidates: [] };
+  }
   if (/诈降/.test(prompt) && /失去.*体力/.test(prompt)) {
     if (!hand.length || unknownHand) {
       return { ...common, kind: 'insufficient', reason: '诈降弃牌代价下，手牌尚未完整识别', candidates: [] };
@@ -196,7 +218,7 @@ export function buildContext(event, publicHistory = []) {
     candidates.push({ id: 'decline', label: '不使用桃，保留手牌', requires_validation: true });
   } else if (/选择.*(?:名|个).*角色.*(?:杀的目标|作为杀的目标)|选择.*目标火攻/.test(prompt)) {
     kind = 'target';
-    const targetCard = /火攻/.test(prompt) ? '火攻' : '杀';
+    targetCard = /火攻/.test(prompt) ? '火攻' : '杀';
     candidates = Object.entries(players).filter(([, player]) =>
       player.relation === '敌方' && player.role_confidence >= 0.7,
     ).map(([seat, player]) => ({
@@ -251,6 +273,7 @@ export function buildContext(event, publicHistory = []) {
           id: `consider-${card.index}-${seat}`,
           label: `考虑第${card.index}张【${card.name}】对${SEAT_LABELS[seat] ?? seat}${player.role}（${player.health ?? '?'}血）；目标与距离须在游戏内核对`,
           card_name: card.name,
+          card_index: card.index,
           target: seat,
           requires_validation: true,
         }));
@@ -259,6 +282,7 @@ export function buildContext(event, publicHistory = []) {
         id: `consider-${card.index}`,
         label: `考虑第${card.index}张【${card.name}】；实际可用性须在游戏内核对`,
         card_name: card.name,
+        card_index: card.index,
         requires_validation: true,
       }];
     });
@@ -273,7 +297,7 @@ export function buildContext(event, publicHistory = []) {
   if (!selfRole && !['discard', 'respond', 'rescue'].includes(kind)) {
     return { ...common, kind: 'insufficient', reason: '尚未可靠识别自己的身份', candidates: [] };
   }
-  return { ...common, kind, candidates };
+  return { ...common, kind, candidates, ...(targetCard ? { target_card: targetCard } : {}) };
 }
 
 export function buildMessages(context) {
@@ -288,7 +312,19 @@ export function buildMessages(context) {
       '屏幕识别可能有误，未知信息不得臆造；角色技能若无文字说明，只可标注待核对。',
       '技能资料仅覆盖已核实的移动版技能；不得把“可考虑”当作确定可发动，必须核对游戏按钮与未识别条件。',
       '按武将识别推得的技能可能未显示按钮；不可断定此刻可以发动。',
-      '只输出JSON：{"choice_id":"候选ID","reason":"具体局势理由，不超过50字"}。/no_think',
+      context.kind === 'play'
+        ? [
+          '现在规划整手已识别牌的出牌顺序，而不是只评估一张牌。结合全手牌、局势、保命和已核实技能比较先后收益。',
+          '可考虑先获得资源、装备再进攻、拆除防御再杀，但不得机械按牌型排序；也可以保留牌结束出牌。',
+          '先比较补牌、装备、拆防御和直接进攻的机会成本；若先杀再无中生有，必须有明确的先杀收益，不能只用“集火”代替顺序分析。',
+          '若要用酒强化杀，酒必须在这张杀之前；不能把未知装备或技能效果当成已发生。',
+          '输出最多6步plan，逐步引用候选ID；同一实体牌只能用一次，最多安排一张杀（缺少已用次数和已装备状态）。',
+          'reserve列出所有没有进入plan的已识别手牌序号，包括闪、无懈、桃等；每张已识别牌必须分配到plan或reserve一次。',
+          'choice_id必须为plan第一步。end只能最后。无中生有或五谷丰登必须为最后一步，获得新牌后重新规划，不预测抽到什么。',
+          '后续步骤只是条件计划，不能假定前一步一定成功、目标一定存活、距离允许或技能必定可用。',
+          '只输出JSON：{"choice_id":"首步ID","reason":"整手牌顺序的局势理由，不超过50字","plan":["首步ID","后续ID"],"reserve":[手牌序号]}。/no_think',
+        ].join('')
+        : '只输出JSON：{"choice_id":"候选ID","reason":"具体局势理由，不超过50字"}。/no_think',
     ].join('') },
     { role: 'user', content: JSON.stringify(context) + '/no_think' },
   ];
@@ -303,7 +339,10 @@ export function validateChoice(context, rawText) {
   if (/无懈.{0,12}(抵消|挡住|防住).{0,8}杀/.test(reason) && !/不能|无法/.test(reason)) {
     throw new Error('模型把无懈可击误用于普通杀');
   }
-  return { candidate, reason };
+  return {
+    candidate, reason,
+    ...(context.kind === 'play' ? validateTurnPlan(context, parsed) : {}),
+  };
 }
 
 export async function askLocalModel(context, {
@@ -317,7 +356,7 @@ export async function askLocalModel(context, {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       model: 'qwen/qwen3-14b', messages: buildMessages(context),
-      temperature: 0.1, max_tokens: 120, stream: false,
+      temperature: 0.1, max_tokens: context.kind === 'play' ? 240 : 120, stream: false,
       response_format: {
         type: 'json_schema',
         json_schema: {
@@ -325,10 +364,19 @@ export async function askLocalModel(context, {
           schema: {
             type: 'object', additionalProperties: false,
             properties: {
-              choice_id: { type: 'string' },
+              choice_id: { type: 'string', enum: context.candidates.map((candidate) => candidate.id) },
               reason: { type: 'string' },
+              ...(context.kind === 'play' ? {
+                plan: { type: 'array', minItems: 1, maxItems: 6,
+                  items: { type: 'string', enum: context.candidates.map((candidate) => candidate.id) } },
+                reserve: { type: 'array', items: { type: 'integer',
+                  enum: context.hand.filter((card) => card.confidence >= 0.7
+                    && (Object.hasOwn(context.rules, card.name) || SLASH_CARDS.has(card.name)))
+                    .map((card) => card.index),
+                } },
+              } : {}),
             },
-            required: ['choice_id', 'reason'],
+            required: context.kind === 'play' ? ['choice_id', 'reason', 'plan', 'reserve'] : ['choice_id', 'reason'],
           },
         },
       },
@@ -342,12 +390,13 @@ export async function askLocalModel(context, {
   const payload = await response.json();
   const rawText = payload.choices?.[0]?.message?.content;
   if (typeof rawText !== 'string') throw new Error('本机模型未返回文字');
-  const { candidate, reason } = validateChoice(context, rawText);
+  const { candidate, reason, ...turnPlan } = validateChoice(context, rawText);
   return {
     status: 'ready', kind: context.kind, frame_id: context.frame_id,
     observed_at: context.observed_at, advice: candidate.label,
     reason, requires_validation: candidate.requires_validation === true,
     unreadable_card_count: context.unreadable_card_count,
+    ...turnPlan,
     model_ms: Math.round(performance.now() - started),
   };
 }

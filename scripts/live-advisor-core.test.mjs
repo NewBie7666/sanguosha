@@ -5,6 +5,7 @@ import {
   askLocalModel,
   buildContext,
   buildDecisionSignature,
+  buildTurnPlanSignature,
   decisionChangeReason,
   normalizeCardName,
   validateChoice,
@@ -71,6 +72,64 @@ test('accepts a valid local model recommendation', async () => {
   assert.equal(advice.status, 'ready');
   assert.match(advice.advice, /无懈可击/);
   assert.equal(advice.frame_id, 42);
+});
+
+test('plans before a card is clicked when the explicit end-play button is visible', () => {
+  const sample = event('', [{ name: '杀', confidence: .99 }]);
+  sample.state.data.decision.actions = '确定 结束出牌';
+  const context = buildContext(sample);
+  assert.equal(context.kind, 'play');
+  assert.equal(context.prompt_source, 'end_play_button');
+  assert.equal(context.candidates[0].card_index, 1);
+  sample.state.data.decision.prompt = '请选择1张手牌';
+  assert.equal(buildContext(sample).kind, 'play');
+  sample.state.data.decision.prompt = '请选择1张同花色手牌';
+  assert.equal(buildContext(sample).kind, 'waiting');
+  sample.state.data.decision.prompt = '';
+  sample.state.data.decision.actions = '确定 取消';
+  assert.equal(buildContext(sample).kind, 'waiting');
+  sample.state.data.decision.actions = '你可发动技能，结束出牌';
+  assert.equal(buildContext(sample).kind, 'waiting');
+  sample.state.scene = 'game_over';
+  sample.state.data.decision.actions = '结束出牌';
+  assert.equal(buildContext(sample).kind, 'waiting');
+});
+
+test('requests and validates an ordered whole-hand plan instead of one card', async () => {
+  const context = buildContext(event('出牌阶段', [
+    { name: '杀', confidence: .99 }, { name: '过河拆桥', confidence: .99 },
+    { name: '闪', confidence: .99 }, { name: '桃', confidence: .99 },
+  ]));
+  let request;
+  const advice = await askLocalModel(context, { fetchImpl: async (_url, options) => {
+    request = JSON.parse(options.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      choice_id: 'consider-2-left', reason: '先拆再杀，并保留闪桃防守',
+      plan: ['consider-2-left', 'consider-1-left'], reserve: [3, 4],
+    }) } }] }));
+  } });
+  assert.deepEqual(request.response_format.json_schema.schema.required, ['choice_id', 'reason', 'plan', 'reserve']);
+  assert.match(request.messages[0].content, /整手/);
+  assert.deepEqual(advice.turn_plan.map((step) => step.card_name), ['过河拆桥', '杀']);
+  assert.match(advice.turn_plan_text, /1\..*过河拆桥[\s\S]*2\..*杀/);
+  assert.match(advice.reserve_text, /闪.*桃/);
+  assert.throws(() => validateChoice(context, JSON.stringify({
+    choice_id: 'consider-1-left', reason: '只挑一张杀',
+  })), /计划/);
+});
+
+test('turn-plan reuse ignores selection prompts but reacts to confidence and player changes', () => {
+  const sample = event('出牌阶段', [{ name: '杀', confidence: .99 }]);
+  const play = buildContext(sample);
+  sample.state.data.decision.prompt = '选择1名角色，作为杀的目标';
+  const target = buildContext(sample);
+  assert.equal(target.target_card, '杀');
+  assert.equal(buildTurnPlanSignature(play), buildTurnPlanSignature(target));
+  sample.state.data.hand_cards[0].confidence = .3;
+  assert.notEqual(buildTurnPlanSignature(play), buildTurnPlanSignature(buildContext(sample)));
+  sample.state.data.hand_cards[0].confidence = .99;
+  sample.state.data.players.left.health = 1;
+  assert.notEqual(buildTurnPlanSignature(play), buildTurnPlanSignature(buildContext(sample)));
 });
 
 test('offers two-card discard combinations for an observed discard prompt', () => {

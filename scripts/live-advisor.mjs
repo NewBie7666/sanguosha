@@ -6,6 +6,7 @@ import {
   askLocalModel,
   buildContext,
   buildDecisionSignature,
+  buildTurnPlanSignature,
   decisionChangeReason,
   normalizeDecisionText,
 } from './live-advisor-core.mjs';
@@ -78,6 +79,7 @@ export class LiveAdvisor {
     this.unstableCount = 0;
     this.unstableContext = null;
     this.heldAdvice = null;
+    this.turnPlan = null;
     this.stats = {
       started: 0,
       completed: 0,
@@ -112,6 +114,7 @@ export class LiveAdvisor {
     this._cancel('unstable_state');
     this.signature = null;
     this.context = null;
+    this.turnPlan = null;
     this._resetUnstable();
     this.result = {
       status: 'waiting',
@@ -165,6 +168,7 @@ export class LiveAdvisor {
     this.publicHistory = [];
     this.signature = null;
     this.context = null;
+    this.turnPlan = null;
     this._resetUnstable();
     this.result = {
       status: 'waiting',
@@ -189,6 +193,7 @@ export class LiveAdvisor {
       this.publicHistory = [];
       this.signature = null;
       this.context = null;
+      this.turnPlan = null;
       this._resetUnstable();
     }
 
@@ -205,6 +210,7 @@ export class LiveAdvisor {
       this._cancel('vision_error');
       this.signature = null;
       this.context = null;
+      this.turnPlan = null;
       this._resetUnstable();
       this.result = { status: 'waiting', reason: event.message ?? '等待视觉识别恢复' };
       return;
@@ -252,6 +258,33 @@ export class LiveAdvisor {
       this.context = context;
     }
 
+    // Selecting a target does not spend a card. Keep the already computed turn
+    // order only while all observed decision data still matches the plan.
+    const planKey = buildTurnPlanSignature(context);
+    if (this.turnPlan && this.turnPlan.key !== planKey) this.turnPlan = null;
+    if (!['play', 'target'].includes(context.kind)) this.turnPlan = null;
+    if (this.turnPlan && context.kind === 'play') {
+      this.result = { ...this.turnPlan.advice, source: 'turn_plan_cache',
+        frame_id: event.frame_id, observed_at: event.timestamp };
+      return;
+    }
+    if (this.turnPlan && context.kind === 'target') {
+      const first = this.turnPlan.advice.turn_plan[0];
+      const plannedTarget = context.candidates.find((candidate) => candidate.target === first.target);
+      const sameCard = first.card_name === context.target_card
+        || (context.target_card === '杀' && ['火杀', '雷杀'].includes(first.card_name));
+      const matchingCards = context.hand.filter((card) => context.target_card === '杀'
+        ? ['杀', '火杀', '雷杀'].includes(card.name) : card.name === context.target_card);
+      if (sameCard && plannedTarget && matchingCards.length === 1) {
+        this.result = { ...this.turnPlan.advice, source: 'turn_plan_cache', kind: 'target',
+          frame_id: event.frame_id, observed_at: event.timestamp,
+          advice: plannedTarget.label, model_ms: 0,
+          planning_note: `${this.turnPlan.advice.planning_note} 当前按原计划选择目标，尚未执行后续步骤。` };
+        return;
+      }
+      this.turnPlan = null;
+    }
+
     let fastDecision;
     try {
       fastDecision = this.fastPolicy(context);
@@ -286,10 +319,13 @@ export class LiveAdvisor {
 
     this.result = {
       status: 'thinking',
-      reason: '正在结合当前局势分析',
+      reason: context.kind === 'play' ? '正在规划整手牌顺序，无需先选择一张牌' : '正在结合当前局势分析',
       frame_id: event.frame_id,
       fast_policy_ms: fastDecision.policy_ms,
       fast_policy_reason: fastDecision.reason,
+      ...(context.kind === 'target' ? {
+        planning_note: '当前是在为已选牌选择目标；回到未选牌的出牌阶段，才能生成整手牌顺序。',
+      } : {}),
     };
     const requestId = this.requestId;
     const controller = new AbortController();
@@ -307,7 +343,13 @@ export class LiveAdvisor {
           ...advice,
           fast_policy_ms: fastDecision?.policy_ms,
           fast_policy_reason: fastDecision?.reason,
+          ...(context.kind === 'target' ? {
+            planning_note: '这是已选牌的目标建议；整手牌顺序需在未选牌的出牌阶段规划。',
+          } : {}),
         };
+        if (context.kind === 'play' && enrichedAdvice.turn_plan?.length) {
+          this.turnPlan = { key: buildTurnPlanSignature(context), advice: enrichedAdvice };
+        }
         if (this.unstableSince !== null) {
           this.heldAdvice = enrichedAdvice;
         } else {
@@ -406,6 +448,7 @@ function serve() {
       advisor.publicHistory = [];
       advisor.signature = null;
       advisor.context = null;
+      advisor.turnPlan = null;
       advisor._resetUnstable();
       advisor.result = { status: 'error', reason: `无法读取 VisionBox：${error.message}` };
     } finally {

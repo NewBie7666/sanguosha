@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { LiveAdvisor, probeLocalModel } from './live-advisor.mjs';
+import { validateChoice } from './live-advisor-core.mjs';
 
 function event(frameId, prompt = '出牌阶段，请选择1张卡牌', hand = '杀') {
   return {
@@ -19,6 +20,79 @@ function event(frameId, prompt = '出牌阶段，请选择1张卡牌', hand = '�
     } },
   };
 }
+
+function plannedEvent(frameId, prompt = '出牌阶段') {
+  const sample = event(frameId, prompt);
+  sample.state.data.hand_cards = [
+    { name: '杀', confidence: .99 }, { name: '八卦阵', confidence: .99 },
+    { name: '闪', confidence: .99 },
+  ];
+  return sample;
+}
+
+function mockTurnPlan(context) {
+  const { candidate, reason, ...plan } = validateChoice(context, JSON.stringify({
+    choice_id: 'consider-1-left', reason: '先集火残血敌人，再考虑防御装备，留闪',
+    plan: ['consider-1-left', 'consider-2'], reserve: [3],
+  }));
+  return { status: 'ready', kind: 'play', advice: candidate.label, reason, ...plan };
+}
+
+test('a selected target follows the whole-hand plan without another model call', async () => {
+  let calls = 0;
+  const advisor = new LiveAdvisor({ now: () => 1_000_500,
+    advise: async (context) => { calls++; return mockTurnPlan(context); } });
+  advisor.ingest(plannedEvent(1));
+  await Promise.resolve();
+  assert.equal(advisor.snapshot().turn_plan.length, 2);
+  advisor.ingest(plannedEvent(2, '选择1名角色，作为杀的目标'));
+  assert.equal(calls, 1);
+  assert.equal(advisor.snapshot().source, 'turn_plan_cache');
+  assert.match(advisor.snapshot().advice, /左侧/);
+  assert.match(advisor.snapshot().turn_plan_text, /八卦阵/);
+  advisor.ingest(plannedEvent(3));
+  assert.equal(calls, 1);
+  assert.match(advisor.snapshot().advice, /杀/);
+});
+
+test('hand changes discard the prior order and wait for a new plan', async () => {
+  const pending = [];
+  const advisor = new LiveAdvisor({ now: () => 1_000_500,
+    advise: (context) => new Promise((resolve) => pending.push({ context, resolve })) });
+  advisor.ingest(plannedEvent(1));
+  pending[0].resolve(mockTurnPlan(pending[0].context));
+  await Promise.resolve();
+  const changed = plannedEvent(2);
+  changed.state.data.hand_cards[1].name = '无中生有';
+  advisor.ingest(changed);
+  assert.equal(pending.length, 2);
+  assert.equal(advisor.turnPlan, null);
+  assert.equal(advisor.snapshot().turn_plan_text, undefined);
+});
+
+test('ambiguous same-name selected cards do not reuse a specific physical card plan', async () => {
+  let calls = 0;
+  const advisor = new LiveAdvisor({ now: () => 1_000_500, advise: async (context) => {
+    calls++;
+    if (context.kind !== 'play') return { status: 'ready', advice: '重新核对目标' };
+    const { candidate, ...plan } = validateChoice(context, JSON.stringify({
+      choice_id: 'consider-1-left', reason: '保留另一张杀',
+      plan: ['consider-1-left', 'consider-2'], reserve: [3, 4],
+    }));
+    return { status: 'ready', advice: candidate.label, ...plan };
+  } });
+  const play = plannedEvent(1);
+  play.state.data.hand_cards.push({ name: '杀', confidence: .99 });
+  advisor.ingest(play);
+  await Promise.resolve();
+  const selected = structuredClone(play);
+  selected.frame_id = 2;
+  selected.timestamp = event(2).timestamp;
+  selected.state.data.decision.prompt = '选择1名角色，作为杀的目标';
+  advisor.ingest(selected);
+  assert.equal(calls, 2);
+  assert.equal(advisor.turnPlan, null);
+});
 
 test('skips the model when the visible decision is not actionable', () => {
   let calls = 0;
