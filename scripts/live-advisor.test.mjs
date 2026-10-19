@@ -243,3 +243,21 @@ test('model indicator requires the configured model to appear in the local model
   const offline = await probeLocalModel(async () => { throw new Error('offline'); });
   assert.equal(offline.connected, false);
 });
+
+test('model indicator distinguishes downloaded and loaded LM Studio models', async () => {
+  for (const state of ['not-loaded', 'loaded']) {
+    const status = await probeLocalModel(async () => new Response(JSON.stringify({
+      data: [{ id: 'qwen/qwen3-14b', state }],
+    }), { status: 200 }));
+    assert.equal(status.connected, state === 'loaded');
+    assert.match(status.reason, state === 'loaded' ? /已加载/ : /未加载/);
+  }
+});
+
+test('model indicator reports unknown readiness on a compatible API without native status', async () => {
+  const status = await probeLocalModel(async (url) => url.includes('/api/v0/')
+    ? new Response('', { status: 404 })
+    : new Response(JSON.stringify({ data: [{ id: 'qwen/qwen3-14b' }] })));
+  assert.equal(status.connected, true);
+  assert.match(status.reason, /加载状态未知/);
+});

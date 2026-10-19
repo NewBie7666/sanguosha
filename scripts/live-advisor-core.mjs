@@ -115,7 +115,9 @@ export function buildContext(event, publicHistory = []) {
     name: normalizeCardName(card.name),
     confidence: Number(card.confidence ?? 0),
   }));
-  const knownHand = hand.filter((card) => card.confidence >= 0.7 && !card.name.includes('未识别'));
+  const knownHand = hand.filter((card) => card.confidence >= 0.7
+    && !card.name.includes('未识别')
+    && (Object.hasOwn(CARD_DESCRIPTIONS, card.name) || SLASH_CARDS.has(card.name)));
   const unknownHand = knownHand.length !== hand.length;
   const rules = Object.fromEntries(
     knownHand.map((card) => [card.name, CARD_DESCRIPTIONS[card.name] ?? '牌效未收录，需以游戏提示为准']),

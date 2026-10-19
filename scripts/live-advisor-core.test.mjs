@@ -43,6 +43,19 @@ test('does not advise when a card is uncertain', () => {
   assert.deepEqual(context.candidates, []);
 });
 
+test('does not offer an OCR word outside the known card vocabulary', () => {
+  const hand = [
+    { name: '营刀杀人', confidence: 0.99 },
+    { name: '殺', confidence: 0.99 },
+  ];
+  const context = buildContext(event('出牌阶段，请选择1张卡牌', hand));
+  assert.equal(context.kind, 'play');
+  assert.equal(context.unreadable_card_count, 1);
+  assert.ok(context.candidates.every((candidate) => candidate.card_name !== '营刀杀人'));
+  assert.ok(context.candidates.some((candidate) => candidate.card_name === '杀'));
+  assert.equal(buildContext(event('弃牌阶段，选1张手牌', hand)).kind, 'insufficient');
+});
+
 test('rejects choices outside current candidates and impossible rule claims', () => {
   const context = buildContext(event('弃牌阶段'));
   assert.throws(() => validateChoice(context, '{"choice_id":"discard-9","reason":"弃错"}'));

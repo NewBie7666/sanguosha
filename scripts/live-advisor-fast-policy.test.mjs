@@ -66,12 +66,21 @@ test('fast discard policy abstains for unreadable or unscored cards', () => {
   ]));
   assert.equal(lowConfidence.status, 'abstain');
 
-  const unknownCard = evaluateFastPolicy(context('弃牌阶段，选1张手牌', [
+  const unknownContext = context('弃牌阶段，选1张手牌', [
     { name: '神秘牌', confidence: 0.99 },
     { name: '桃', confidence: 0.99 },
-  ]));
+  ]);
+  assert.equal(unknownContext.kind, 'insufficient');
+  assert.equal(unknownContext.unreadable_card_count, 1);
+  const unknownCard = evaluateFastPolicy(unknownContext);
   assert.equal(unknownCard.status, 'abstain');
-  assert.match(unknownCard.reason, /未收录/);
+
+  const unscoredCard = evaluateFastPolicy(context('弃牌阶段，选1张手牌', [
+    { name: '八卦阵', confidence: 0.99 },
+    { name: '桃', confidence: 0.99 },
+  ]));
+  assert.equal(unscoredCard.status, 'abstain');
+  assert.match(unscoredCard.reason, /未收录/);
 });
 
 test('fast flash policy only recommends at one health with a readable flash', () => {
@@ -145,8 +154,8 @@ test('disconnected model is not on the fast path for an ambiguous decision', asy
     },
   });
   advisor.ingest(event('弃牌阶段，选1张手牌', [
-    { name: '神秘牌', confidence: 0.99 },
-    { name: '桃', confidence: 0.99 },
+    { name: '杀', confidence: 0.99 },
+    { name: '火杀', confidence: 0.99 },
   ]));
   await Promise.resolve();
   assert.equal(modelCalls, 1);

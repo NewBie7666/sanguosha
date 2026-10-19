@@ -21,6 +21,7 @@ const UNSTABLE_GRACE_MS = 600;
 const UNSTABLE_GRACE_EVENTS = 3;
 const MODEL_ID = 'qwen/qwen3-14b';
 const MODEL_LIST_URL = process.env.LIVE_ADVISOR_MODEL_LIST_URL ?? 'http://127.0.0.1:1234/v1/models';
+const MODEL_STATUS_URL = process.env.LIVE_ADVISOR_MODEL_STATUS_URL ?? 'http://127.0.0.1:1234/api/v0/models';
 const SUPPORTED_PLUGIN = 'sanguosha';
 
 export async function probeLocalModel(fetchImpl = fetch) {
@@ -31,7 +32,24 @@ export async function probeLocalModel(fetchImpl = fetch) {
     if (!payload.data?.some((item) => item.id === MODEL_ID)) {
       return { connected: false, reason: `未找到已加载的 ${MODEL_ID}` };
     }
-    return { connected: true, reason: `${MODEL_ID} 已就绪` };
+    // LM Studio's compatible model list includes downloaded, unloaded models.
+    // Its native status endpoint can distinguish availability from readiness.
+    try {
+      const statusResponse = await fetchImpl(MODEL_STATUS_URL, { signal: AbortSignal.timeout(1500) });
+      if (statusResponse.ok) {
+        const status = await statusResponse.json();
+        const model = status.data?.find((item) => item.id === MODEL_ID);
+        if (model?.state === 'not-loaded') {
+          return { connected: false, reason: `${MODEL_ID} 已下载但未加载` };
+        }
+        if (model?.state === 'loaded') {
+          return { connected: true, reason: `${MODEL_ID} 已加载` };
+        }
+      }
+    } catch {
+      // Other compatible providers may not expose LM Studio's native status.
+    }
+    return { connected: true, reason: `${MODEL_ID} 接口已连接，加载状态未知` };
   } catch {
     return { connected: false, reason: '无法连接本机模型接口' };
   }
