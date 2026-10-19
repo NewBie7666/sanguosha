@@ -416,7 +416,7 @@ function serve() {
   void poll();
 
   const server = createServer((request, response) => {
-    response.setHeader('Access-Control-Allow-Origin', 'http://127.0.0.1:8765');
+    response.setHeader('Access-Control-Allow-Origin', new URL(VISION_URL).origin);
     response.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     response.setHeader('Cache-Control', 'no-store');
     if (request.method === 'OPTIONS') {

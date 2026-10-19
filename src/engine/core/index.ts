@@ -331,13 +331,12 @@ export async function dispatch(state: GameState, message: ClientMessage): Promis
   // skip 触发超时的路径需要:fireTimeoutNow resolve 广播/阻塞 slot → 父 execute 跨微任务
   // resume 到下一挂起点;若不等它,restore 的下一条 action 会在 resume 创建的新 slot
   // 出现前被 validate 拒绝(与下方 respond 路径的 settleAfterDrain 同理)。
-  // 预算取宽(1s):父 resume 链可能含技能模块的首次动态 import,vitest 下按需转换可达
-  // 数百毫秒,预算不足会让 restore 抢跑(后续条目被静默拒绝)。使用 monotonic clock
-  // 计时,避免 setTimeout(0) 的实际延迟变化把固定迭代次数误算成预算。
+  // 父 resume 链可能含技能模块的首次动态 import。暂保留现有 1000 次 yield:
+  // 固定 1s 的替代方案在 coverage 冷加载下出现重放 seq 不一致,不能视为同步完成。
+  // Windows 上此等待较慢;后续需用父执行任务的显式完成信号替代时间预算。
   // 排空只影响 settle 信号时机,不触碰任何游戏状态,不破坏重放确定性。
   const drainUntilSettled = async (): Promise<void> => {
-    const deadline = performance.now() + 1000;
-    while (!settled && performance.now() < deadline) {
+    for (let i = 0; i < 1000 && !settled; i++) {
       await new Promise((r) => setTimeout(r, 0));
     }
   };
