@@ -158,7 +158,7 @@ export function GameViewComponentImpl({
   viewRef.current = view;
 
   // ─── 状态派生(hooks) ───
-  const { skillActions } = useSkillActions(view, perspectiveIdx);
+  const { skillActions, skillActionsReady } = useSkillActions(view, perspectiveIdx);
   const pendingState = usePendingState(view, perspectiveIdx, skillActions);
   const {
     pending,
@@ -250,7 +250,7 @@ export function GameViewComponentImpl({
 
   // 自动跳过决策(无法响应/策略跳过时代发 skip)。需在 send 定义后调用。
   useAutoSkip({
-    view, perspectiveIdx, skillActions, pendingRespondInfo, prefs: autoSkipPrefs,
+    view, perspectiveIdx, skillActions, skillActionsReady, pendingRespondInfo, prefs: autoSkipPrefs,
     canOperate, isPerspectiveAwaiting, markBroadcastSkipped, broadcastKey, send,
   });
 

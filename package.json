@@ -28,7 +28,8 @@
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "db:generate": "drizzle-kit generate",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "test:live-advisor": "node --test scripts/live-advisor*.test.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
