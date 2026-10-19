@@ -2,7 +2,7 @@
 // 这是回归测试:如果未来有人撤销了 harness 的防护,此文件会立即失败。
 // 验证 harness 改进:确认引擎异常 + applyView 异常不再被静默吞掉。
 // 这是回归测试:如果未来有人撤销了 harness 的防护,此文件会立即失败。
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { SkillTestHarness, assertNoEngineErrors } from '../engine-harness';
 import '../../src/engine/atoms';
 import { createGameState } from '../../src/engine/types';
@@ -145,26 +145,57 @@ describe('harness 改进:引擎异常不再静默吞掉', () => {
 // execute 是 fire-and-forget;settle 改为 resolve(Error) 后,await settle 方(如 restore)
 // 才能感知 execute 抛错并中断。validate 拒绝非 execute 错误,settle 应 resolve(undefined)。
 describe('dispatch settle 携带 execute 错误', () => {
+  it('无旧 slot 的成功 execute → settle 不等待定时器', async () => {
+    vi.useFakeTimers();
+    let unregister: (() => void) | undefined;
+    try {
+      const state = build();
+      unregister = registerAction(state, '测试', 0, 'success-no-slot', () => null, async () => {});
+      const { accepted, settle } = await dispatch(state, {
+        skillId: '测试',
+        actionType: 'success-no-slot',
+        ownerId: 0,
+        params: {},
+        baseSeq: state.seq,
+      });
+      expect(accepted).toBe(true);
+      // 不推进 fake timers:无旧 slot 时 settleAfterDrain 不应排空 setTimeout(0)。
+      expect(await settle).toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      unregister?.();
+    }
+  });
+
   it('execute 抛错 → settle resolve 该错误,且 onError 同步上报', async () => {
-    const state = build();
-    const errors: Error[] = [];
-    state.onError = (e: Error) => errors.push(e);
-    const unregister = registerAction(state, '测试', 0, 'boom', () => null, async () => {
-      throw new Error('execute 内部抛错');
-    });
-    const { settle } = await dispatch(state, {
-      skillId: '测试',
-      actionType: 'boom',
-      ownerId: 0,
-      params: {},
-      baseSeq: state.seq,
-    });
-    const settleError = await settle;
-    expect(settleError).toBeInstanceOf(Error);
-    expect(settleError?.message).toBe('execute 内部抛错');
-    // onError 回调仍同步上报(双通道:settle 携带 + onError 上报)
-    expect(errors.some((e) => e.message === 'execute 内部抛错')).toBe(true);
-    unregister();
+    vi.useFakeTimers();
+    let unregister: (() => void) | undefined;
+    try {
+      const state = build();
+      const errors: Error[] = [];
+      const sameError = new Error('execute 内部抛错');
+      state.onError = (e: Error) => errors.push(e);
+      unregister = registerAction(state, '测试', 0, 'boom', () => null, async () => {
+        throw sameError;
+      });
+      const { settle } = await dispatch(state, {
+        skillId: '测试',
+        actionType: 'boom',
+        ownerId: 0,
+        params: {},
+        baseSeq: state.seq,
+      });
+      // 不推进 fake timers:execute 错误应跳过 drain 并立即携带原始 Error resolve。
+      const settleError = await settle;
+      expect(settleError).toBe(sameError);
+      // onError 回调仍同步上报(双通道:settle 携带 + onError 上报)
+      expect(errors).toEqual([sameError]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      unregister?.();
+    }
   });
 
   it('validate 拒绝 → settle resolve undefined(非 execute 错误)', async () => {
