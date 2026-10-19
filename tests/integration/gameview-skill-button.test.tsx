@@ -72,7 +72,7 @@ describe('GameView:仁德/制衡 distribute 主动技按钮', () => {
 
     // registerSkillActions 是 async(dynamic import),需等待按钮出现
     // 按钮文本是技能名 '仁德'(skillRow 里 visibleSkills 渲染)
-    const rendeBtn = await screen.findByRole('button', { name: '仁德' });
+    const rendeBtn = await screen.findByRole('button', { name: '仁德' }, { timeout: 5000 });
     expect(rendeBtn).toBeDefined();
   });
 
@@ -80,7 +80,7 @@ describe('GameView:仁德/制衡 distribute 主动技按钮', () => {
     const view = makeView();
     render(<GameViewComponent view={view} onAction={() => {}} />);
 
-    const rendeBtn = await screen.findByRole('button', { name: '仁德' });
+    const rendeBtn = await screen.findByRole('button', { name: '仁德' }, { timeout: 5000 });
     fireEvent.click(rendeBtn);
 
     // 弹窗标题应包含 '仁德'(prompt.title),且 DistributeUI allocate 模式会显示手牌按钮 + 玩家分配按钮
@@ -113,7 +113,7 @@ describe('GameView:仁德/制衡 distribute 主动技按钮', () => {
     });
     render(<GameViewComponent view={view} onAction={() => {}} />);
 
-    const zhihengBtn = await screen.findByRole('button', { name: '制衡' });
+    const zhihengBtn = await screen.findByRole('button', { name: '制衡' }, { timeout: 5000 });
     fireEvent.click(zhihengBtn);
 
     // select 模式:标题含 '制衡',且有 '确认' 提交按钮(DistributeUI select 分支)

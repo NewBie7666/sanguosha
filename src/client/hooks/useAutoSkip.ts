@@ -18,6 +18,8 @@ export interface UseAutoSkipInput {
   view: GameView;
   perspectiveIdx: number;
   skillActions: SkillActionDef[];
+  /** 当前视角的技能 action 已完成异步注册。false 时不得推断无法响应。 */
+  skillActionsReady: boolean;
   pendingRespondInfo: PendingRespondInfo | null;
   prefs: AutoSkipPrefs;
   /** 是否可操作(非回放/旁观) */
@@ -33,7 +35,7 @@ export interface UseAutoSkipInput {
 
 export function useAutoSkip(input: UseAutoSkipInput): void {
   const {
-    view, perspectiveIdx, skillActions, pendingRespondInfo, prefs,
+    view, perspectiveIdx, skillActions, skillActionsReady, pendingRespondInfo, prefs,
     canOperate, isPerspectiveAwaiting, markBroadcastSkipped, broadcastKey, send,
   } = input;
 
@@ -45,9 +47,16 @@ export function useAutoSkip(input: UseAutoSkipInput): void {
 
   useEffect(() => {
     // 清理上一个定时器(pending 变化或组件卸载)
+    const hadPendingTimer = timerRef.current !== null;
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
+    }
+    if (!skillActionsReady) {
+      // 当前技能集合尚未注册完成:若取消了尚未触发的延迟 skip,ready 恢复后必须重新
+      // 判断同一 pending;已经 act-now 发送过的窗口保留 deadline,避免重复发送 skip。
+      if (hadPendingTimer) lastDeadlineRef.current = null;
+      return;
     }
     if (!canOperate || !isPerspectiveAwaiting) return;
 
@@ -84,7 +93,7 @@ export function useAutoSkip(input: UseAutoSkipInput): void {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    view, perspectiveIdx, skillActions, pendingRespondInfo, prefs,
+    view, perspectiveIdx, skillActions, skillActionsReady, pendingRespondInfo, prefs,
     canOperate, isPerspectiveAwaiting, broadcastKey,
   ]);
 

@@ -64,7 +64,7 @@ describe('useAutoSkip — 延迟 skip 防串扰', () => {
       (props) => useAutoSkip(props),
       {
         initialProps: {
-          view: v1, perspectiveIdx: 0, skillActions: NO_ACTIONS,
+          view: v1, perspectiveIdx: 0, skillActions: NO_ACTIONS, skillActionsReady: true,
           pendingRespondInfo: wuxieRespond, prefs: NO_PREFS,
           canOperate: true, isPerspectiveAwaiting: true,
           markBroadcastSkipped, broadcastKey: 'k1', send,
@@ -76,7 +76,7 @@ describe('useAutoSkip — 延迟 skip 防串扰', () => {
     // 窗口2:杀问询,P0 有杀 → 能响应 → wait(不应被跳过)
     const v2 = makeView(killPending(2000), [kill]);
     rerender({
-      view: v2, perspectiveIdx: 0, skillActions: NO_ACTIONS,
+      view: v2, perspectiveIdx: 0, skillActions: NO_ACTIONS, skillActionsReady: true,
       pendingRespondInfo: killRespond, prefs: NO_PREFS,
       canOperate: true, isPerspectiveAwaiting: true,
       markBroadcastSkipped, broadcastKey: 'k2', send,
@@ -100,7 +100,7 @@ describe('useAutoSkip — 延迟 skip 防串扰', () => {
       (props) => useAutoSkip(props),
       {
         initialProps: {
-          view: v1, perspectiveIdx: 0, skillActions: NO_ACTIONS,
+          view: v1, perspectiveIdx: 0, skillActions: NO_ACTIONS, skillActionsReady: true,
           pendingRespondInfo: wuxieRespond, prefs: NO_PREFS,
           canOperate: true, isPerspectiveAwaiting: true,
           markBroadcastSkipped, broadcastKey: 'k1', send,
@@ -113,5 +113,141 @@ describe('useAutoSkip — 延迟 skip 防串扰', () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith('__skip', 'skip', {});
     vi.useRealTimers();
+  });
+
+  it('技能 action 尚未注册完成时,超过自动跳过延迟也不发送 skip', () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn();
+      const markBroadcastSkipped = vi.fn();
+      const view = makeView(killPending(1000), []);
+      const { rerender } = renderHook(
+        (props) => useAutoSkip(props),
+        {
+          initialProps: {
+            view, perspectiveIdx: 0, skillActions: NO_ACTIONS, skillActionsReady: false,
+            pendingRespondInfo: killRespond, prefs: NO_PREFS,
+            canOperate: true, isPerspectiveAwaiting: true,
+            markBroadcastSkipped, broadcastKey: 'loading', send,
+          },
+        },
+      );
+
+      vi.advanceTimersByTime(5000);
+      expect(send).not.toHaveBeenCalled();
+
+      rerender({
+        view, perspectiveIdx: 0, skillActions: NO_ACTIONS, skillActionsReady: true,
+        pendingRespondInfo: killRespond, prefs: NO_PREFS,
+        canOperate: true, isPerspectiveAwaiting: true,
+        markBroadcastSkipped, broadcastKey: 'loading', send,
+      });
+      expect(send).toHaveBeenCalledWith('__skip', 'skip', {});
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('已发送的同一窗口在技能 ready 短暂变 false 后不重复 skip', () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn();
+      const markBroadcastSkipped = vi.fn();
+      const view = makeView(killPending(1000), []);
+      const { rerender } = renderHook(
+        (props) => useAutoSkip(props),
+        {
+          initialProps: {
+            view, perspectiveIdx: 0, skillActions: NO_ACTIONS, skillActionsReady: true,
+            pendingRespondInfo: killRespond, prefs: NO_PREFS,
+            canOperate: true, isPerspectiveAwaiting: true,
+            markBroadcastSkipped, broadcastKey: 'already-sent', send,
+          },
+        },
+      );
+
+      expect(send).toHaveBeenCalledTimes(1);
+      rerender({
+        view, perspectiveIdx: 0, skillActions: NO_ACTIONS, skillActionsReady: false,
+        pendingRespondInfo: killRespond, prefs: NO_PREFS,
+        canOperate: true, isPerspectiveAwaiting: true,
+        markBroadcastSkipped, broadcastKey: 'already-sent', send,
+      });
+      rerender({
+        view, perspectiveIdx: 0, skillActions: NO_ACTIONS, skillActionsReady: true,
+        pendingRespondInfo: killRespond, prefs: NO_PREFS,
+        canOperate: true, isPerspectiveAwaiting: true,
+        markBroadcastSkipped, broadcastKey: 'already-sent', send,
+      });
+
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('技能 action 加载完成前不误跳过,加载后识别武圣红牌可响应', () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn();
+      const markBroadcastSkipped = vi.fn();
+      const view = makeView(killPending(1000), [flash]);
+      const wusheng: SkillActionDef = {
+        skillId: '武圣', ownerId: 0, actionType: 'transform', label: '武圣',
+        prompt: { type: 'useCard', title: '武圣', cardFilter: { filter: () => true, min: 1, max: 1 } },
+        activeWhen: () => true,
+      };
+      const { rerender } = renderHook(
+        (props) => useAutoSkip(props),
+        {
+          initialProps: {
+            view, perspectiveIdx: 0, skillActions: NO_ACTIONS, skillActionsReady: false,
+            pendingRespondInfo: killRespond, prefs: NO_PREFS,
+            canOperate: true, isPerspectiveAwaiting: true,
+            markBroadcastSkipped, broadcastKey: 'wusheng', send,
+          },
+        },
+      );
+
+      vi.advanceTimersByTime(5000);
+      expect(send).not.toHaveBeenCalled();
+
+      rerender({
+        view, perspectiveIdx: 0, skillActions: [wusheng], skillActionsReady: true,
+        pendingRespondInfo: killRespond, prefs: NO_PREFS,
+        canOperate: true, isPerspectiveAwaiting: true,
+        markBroadcastSkipped, broadcastKey: 'wusheng', send,
+      });
+      vi.advanceTimersByTime(5000);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('技能 action 加载完成且确实无法响应时,仍按正常延迟发送 skip', () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn();
+      const markBroadcastSkipped = vi.fn();
+      const view = makeView(killPending(1000), [flash]);
+      renderHook(
+        (props) => useAutoSkip(props),
+        {
+          initialProps: {
+            view, perspectiveIdx: 0, skillActions: NO_ACTIONS, skillActionsReady: true,
+            pendingRespondInfo: killRespond, prefs: NO_PREFS,
+            canOperate: true, isPerspectiveAwaiting: true,
+            markBroadcastSkipped, broadcastKey: 'loaded-no-response', send,
+          },
+        },
+      );
+
+      expect(send).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(2000);
+      expect(send).toHaveBeenCalledWith('__skip', 'skip', {});
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

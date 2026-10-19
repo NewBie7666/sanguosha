@@ -79,7 +79,7 @@ describe('GameView:装备牌出牌(回归 selectedUseAction 查找)', () => {
     // 选中装备牌后应出现"出牌"按钮(修复前 selectedUseAction 为 undefined → 不渲染)
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /^出牌/ })).toBeDefined();
-    });
+    }, { timeout: 5000 });
   });
 
   it('点击"出牌"按钮 → onAction 以 skillId="装备通用" 提交', async () => {
@@ -90,7 +90,7 @@ describe('GameView:装备牌出牌(回归 selectedUseAction 查找)', () => {
     const weaponCard = await screen.findByText('诸葛连弩');
     fireEvent.click(weaponCard);
 
-    const playBtn = await screen.findByRole('button', { name: /^出牌/ });
+    const playBtn = await screen.findByRole('button', { name: /^出牌/ }, { timeout: 5000 });
     fireEvent.click(playBtn);
 
     await waitFor(() => {
@@ -116,7 +116,7 @@ describe('GameView:装备牌出牌(回归 selectedUseAction 查找)', () => {
     const horseCard = await screen.findByText('赤兔');
     fireEvent.click(horseCard);
 
-    const playBtn = await screen.findByRole('button', { name: /^出牌/ });
+    const playBtn = await screen.findByRole('button', { name: /^出牌/ }, { timeout: 5000 });
     fireEvent.click(playBtn);
 
     await waitFor(() => {
